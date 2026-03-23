@@ -20,8 +20,8 @@
   <arg name="voxblox_config_file" default="$(find mggplanner)/config/$(arg robot_name)/voxblox_sim_config_sim.yaml"/>
   <arg name="map_config_file" default="$(arg voxblox_config_file)"/>
   <!-- <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/niosh_osrf.world"/> -->
-  <!-- <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/darpa_cave_01.world"/> -->
-  <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/pittsburgh_mine.world"/>
+  <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/darpa_cave_01.world"/>
+  <!-- <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/pittsburgh_mine.world"/> -->
 
  
   <env name="GAZEBO_MODEL_PATH" value="${GAZEBO_MODEL_PATH}:$(find planner_gazebo_sim)/models:$(find subt_cave_sim)/models"/>
@@ -38,6 +38,13 @@
   <node pkg="tf" type="static_transform_publisher" name="tfw_w1" args="0 0 0 0 0 0 world $(arg robot_id1)/world 100" />
   <node pkg="tf" type="static_transform_publisher" name="tfw_w2" args="0 0 0 0 0 0 world $(arg robot_id2)/world 100" />
   <node pkg="tf" type="static_transform_publisher" name="tfw_w3" args="0 0 0 0 0 0 world $(arg robot_id3)/world 100" />
+
+  <!-- Pairwise distances in world frame; publishes /inter_robot_pairwise_distances (Float32MultiArray: R1-R2, R1-R3, R2-R3) for realTimePlot -->
+  <node pkg="visualization_tools" type="inter_robot_distances.py" name="inter_robot_distances" output="screen">
+    <param name="world_frame" value="world"/>
+    <param name="rate_hz" value="10"/>
+    <rosparam param="robot_base_frames" subst_value="true">["$(arg robot_id1)/base_link","$(arg robot_id2)/base_link","$(arg robot_id3)/base_link"]</rosparam>
+  </node>
 
  <group ns="$(arg robot_id1)">
 
@@ -148,8 +155,8 @@
     <arg name="joystick" value="false"/>
     <!-- <arg name="x" value="-7.286" /> -->
     <!-- <arg name="y" value="12.731" />    -->
-    <arg name="x" value="20.223" />
-    <arg name="y" value="13.0" />
+    <arg name="x" value="5.0" />
+    <arg name="y" value="0.0" />
     <arg name="z" value="0.5" />
     <arg name="robot_namespace" value="$(arg robot_id2)" />
     <arg name="robot_id" value="$(arg robot_id2)" />
@@ -163,8 +170,8 @@
 
   <include file="$(find local_planner)/launch/local_planner_mggplanner.launch" >
     <arg name="cameraOffsetZ" value="0"/>
-    <arg name="goalX" value="20.233"/>
-    <arg name="goalY" value="13.0"/>
+    <arg name="goalX" value="5.0"/>
+    <arg name="goalY" value="0.0"/>
     <arg name="RobotID_TF_prefix" value="$(arg robot_id2)/"/>
 
   </include>
