@@ -5,7 +5,9 @@
 #include <fstream>
 #include <iostream>
 #include <list>
+#include <limits>
 #include <numeric>
+#include <string>
 #include <unordered_map>
 
 #include <eigen3/Eigen/Dense>
@@ -279,8 +281,14 @@ class Rrg {
   void mergeNeighbourGraph(std::shared_ptr<GraphManager> graph_manager,
                               std::vector<std::pair<int,Vertex*>> merged_connecting_nodes,
                               std::shared_ptr<GraphManager> neighbour_graph_manager);
+  bool satisfyCommunicationConstraint(const StateVec& candidate_state);
 
   std::string world_frame_ = "world";
+  std::string self_base_frame_ = "";
+  bool comm_constraint_enable_ = false;
+  bool comm_constraint_use_2d_ = true;
+  double comm_constraint_max_distance_ = 15.0;
+  std::vector<std::string> comm_constraint_peer_frames_;
 
   uint32_t robot_id_ = 0;
 

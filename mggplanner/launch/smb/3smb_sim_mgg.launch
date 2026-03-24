@@ -111,6 +111,10 @@
     <param name="world_frame" value="$(arg robot_id1)/world"/>
     <param name="PlanningParams/robot_id" value="$(arg robot_id1_int)"/>
     <param name="PlanningParams/sim" value="1"/>
+    <param name="comm_constraint_enable" value="true"/>
+    <param name="comm_constraint_max_distance" value="30.0"/>
+    <param name="comm_constraint_use_2d" value="true"/>
+    <rosparam param="comm_constraint_peer_frames">["R1/base_link","R2/base_link","R3/base_link"]</rosparam>
   </node>
 
   <!-- Planner and Control Interface -->
@@ -155,7 +159,7 @@
     <arg name="joystick" value="false"/>
     <!-- <arg name="x" value="-7.286" /> -->
     <!-- <arg name="y" value="12.731" />    -->
-    <arg name="x" value="5.0" />
+    <arg name="x" value="3.0" />
     <arg name="y" value="0.0" />
     <arg name="z" value="0.5" />
     <arg name="robot_namespace" value="$(arg robot_id2)" />
@@ -170,7 +174,7 @@
 
   <include file="$(find local_planner)/launch/local_planner_mggplanner.launch" >
     <arg name="cameraOffsetZ" value="0"/>
-    <arg name="goalX" value="5.0"/>
+    <arg name="goalX" value="3.0"/>
     <arg name="goalY" value="0.0"/>
     <arg name="RobotID_TF_prefix" value="$(arg robot_id2)/"/>
 
@@ -214,6 +218,10 @@
     <param name="world_frame" value="$(arg robot_id2)/world"/>
     <param name="PlanningParams/robot_id" value="$(arg robot_id2_int)"/>
     <param name="PlanningParams/sim" value="1"/>
+    <param name="comm_constraint_enable" value="true"/>
+    <param name="comm_constraint_max_distance" value="30.0"/>
+    <param name="comm_constraint_use_2d" value="true"/>
+    <rosparam param="comm_constraint_peer_frames">["R1/base_link","R2/base_link","R3/base_link"]</rosparam>
   </node>
 
   <!-- Planner and Control Interface -->
@@ -255,8 +263,8 @@
 
   <include file="$(find smb_gazebo)/launch/spawn_smb.launch">
     <arg name="joystick" value="false"/>
-    <arg name="x" value="-16.3" />
-    <arg name="y" value="15.0" />
+    <arg name="x" value="0.0" />
+    <arg name="y" value="5.0" />
     <arg name="z" value="0.5" />
     <arg name="robot_namespace" value="$(arg robot_id3)" />
     <arg name="robot_id" value="$(arg robot_id3)" />
@@ -270,8 +278,8 @@
 
   <include file="$(find local_planner)/launch/local_planner_mggplanner.launch" >
     <arg name="cameraOffsetZ" value="0"/>
-    <arg name="goalX" value="-16.3"/>
-    <arg name="goalY" value="15.0"/>
+    <arg name="goalX" value="0.0"/>
+    <arg name="goalY" value="5.0"/>
     <arg name="RobotID_TF_prefix" value="$(arg robot_id3)/"/>
   </include>
  
@@ -314,6 +322,10 @@
     <param name="world_frame" value="$(arg robot_id3)/world"/>
     <param name="PlanningParams/robot_id" value="$(arg robot_id3_int)"/>
     <param name="PlanningParams/sim" value="1"/>
+    <param name="comm_constraint_enable" value="true"/>
+    <param name="comm_constraint_max_distance" value="30.0"/>
+    <param name="comm_constraint_use_2d" value="true"/>
+    <rosparam param="comm_constraint_peer_frames">["R1/base_link","R2/base_link","R3/base_link"]</rosparam>
   </node>
 
   <!-- Planner and Control Interface -->

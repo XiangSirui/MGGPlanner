@@ -793,6 +793,9 @@ void Rrg::expandGraph(std::shared_ptr<GraphManager> graph_manager,
      && fabs(nearest_vertex->state[2] - new_state[2]) > planning_params_.nearest_range_z){
     admissible_edge = false;
   }
+  if (admissible_edge && !satisfyCommunicationConstraint(new_state)) {
+    admissible_edge = false;
+  }
   if (admissible_edge) {
     Vertex* new_vertex =
         new Vertex(graph_manager->generateVertexID(), new_state);
@@ -1080,6 +1083,9 @@ void Rrg::expandGraph(std::shared_ptr<GraphManager> graph_manager,
     if (inclination > planning_params_.max_inclination) {
       admissible_edge = false;
     }
+  }
+  if (admissible_edge && !satisfyCommunicationConstraint(new_state)) {
+    admissible_edge = false;
   }
   if (admissible_edge) {
     Vertex* new_vertex_ptr =
@@ -3087,7 +3093,23 @@ bool Rrg::loadParams(bool shared_params) {
   if (!planning_params_.loadParams(ns + "/PlanningParams")) return false;
   world_frame_ = planning_params_.global_frame_id;
   robot_id_ = planning_params_.robot_id;
+  self_base_frame_ = "R" + std::to_string(robot_id_) + "/base_link";
+  nh_private_.param("comm_constraint_enable", comm_constraint_enable_, false);
+  nh_private_.param("comm_constraint_use_2d", comm_constraint_use_2d_, true);
+  nh_private_.param("comm_constraint_max_distance", comm_constraint_max_distance_, 15.0);
+  if (!nh_private_.getParam("comm_constraint_peer_frames",
+                            comm_constraint_peer_frames_)) {
+    comm_constraint_peer_frames_.clear();
+    comm_constraint_peer_frames_.push_back("R1/base_link");
+    comm_constraint_peer_frames_.push_back("R2/base_link");
+    comm_constraint_peer_frames_.push_back("R3/base_link");
+  }
   ROS_WARN("LOADING ROBOT ID %u",robot_id_);
+  ROS_WARN_COND(
+      comm_constraint_enable_, "[CommunicationConstraint] enabled max=%.2f, "
+      "mode=%s, self=%s, peers=%zu",
+      comm_constraint_max_distance_, comm_constraint_use_2d_ ? "2D" : "3D",
+      self_base_frame_.c_str(), comm_constraint_peer_frames_.size());
   // Sloppy way of init pose. TODO: got to do it better.
   if(planning_params_.sim == 0){
     if(planning_params_.robot_id == 1){
@@ -3272,6 +3294,48 @@ bool Rrg::loadParams(bool shared_params) {
   // after loading parameters for all fields.
   initializeParams();
   return true;
+}
+
+bool Rrg::satisfyCommunicationConstraint(const StateVec& candidate_state) {
+  if (!comm_constraint_enable_) {
+    return true;
+  }
+  if (comm_constraint_peer_frames_.empty()) {
+    return true;
+  }
+
+  double nearest_peer_distance = std::numeric_limits<double>::infinity();
+  bool found_peer = false;
+  for (const auto& peer_frame : comm_constraint_peer_frames_) {
+    if (peer_frame == self_base_frame_) {
+      continue;
+    }
+    tf::StampedTransform peer_tf;
+    try {
+      listener_->lookupTransform(world_frame_, peer_frame, ros::Time(0), peer_tf);
+    } catch (tf::TransformException& ex) {
+      ROS_WARN_THROTTLE(2.0, "[CommunicationConstraint] TF lookup failed (%s -> %s): %s",
+                        world_frame_.c_str(), peer_frame.c_str(), ex.what());
+      continue;
+    }
+
+    const double dx = candidate_state[0] - peer_tf.getOrigin().x();
+    const double dy = candidate_state[1] - peer_tf.getOrigin().y();
+    double d = std::sqrt(dx * dx + dy * dy);
+    if (!comm_constraint_use_2d_) {
+      const double dz = candidate_state[2] - peer_tf.getOrigin().z();
+      d = std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    nearest_peer_distance = std::min(nearest_peer_distance, d);
+    found_peer = true;
+  }
+
+  if (!found_peer) {
+    // Do not block planning when peer TF is temporarily unavailable.
+    return true;
+  }
+
+  return nearest_peer_distance <= comm_constraint_max_distance_;
 }
 
 void Rrg::setGeofenceManager(
