@@ -197,8 +197,8 @@
 		<param name="look_ahead_distance" value="1.2"/>
 		<param name="dt" value="0.1"/>
 		<param name="goal_reaching_threshold" value="1.0"/>
-		<param name="robot_frame" value="$(arg robot_id1)/base_link"/>
-		<param name="fixed_frame" value="$(arg robot_id1)/world"/>
+		<param name="robot_frame" value="$(arg robot_id2)/base_link"/>
+		<param name="fixed_frame" value="$(arg robot_id2)/world"/>
 	</node>
 
   <node pkg="topic_tools" type="relay" name="nei_graph_r1tor2" args="/$(arg robot_id1)/neighbour_graph_out neighbour_graph_in" />
@@ -241,7 +241,7 @@
   <node pkg="rviz" type="rviz" name="mggplanner_ui" output="screen" args="-d $(find mggplanner)/config/rviz/smbR2.rviz"/>
 
   <node pkg="visualization_tools" type="visualizationTools" name="visualizationTools" output="screen">
-    <param name="robotID" type="int" value="$(arg robot_id1_int)"/>
+    <param name="robotID" type="int" value="$(arg robot_id2_int)"/>
     <param name="max_battery_distance" type="double" value="$(arg max_battery_distance)" />
     <param name="metricFile" type="string" value="$(find visualization_tools)/log/metrics$(arg robot_id2)" />
     <param name="trajFile" type="string" value="$(find visualization_tools)/log/trajectory$(arg robot_id2)" />
@@ -301,8 +301,8 @@
 		<param name="look_ahead_distance" value="1.2"/>
 		<param name="dt" value="0.1"/>
 		<param name="goal_reaching_threshold" value="1.0"/>
-		<param name="robot_frame" value="$(arg robot_id1)/base_link"/>
-		<param name="fixed_frame" value="$(arg robot_id1)/world"/>
+		<param name="robot_frame" value="$(arg robot_id3)/base_link"/>
+		<param name="fixed_frame" value="$(arg robot_id3)/world"/>
 	</node>
 
   <node pkg="topic_tools" type="relay" name="nei_graph_r2tor3" args="/$(arg robot_id2)/neighbour_graph_out neighbour_graph_in" />
@@ -347,7 +347,7 @@
  
 
   <node pkg="visualization_tools" type="visualizationTools" name="visualizationTools" output="screen">
-    <param name="robotID" type="int" value="$(arg robot_id1_int)"/>
+    <param name="robotID" type="int" value="$(arg robot_id3_int)"/>
     <param name="max_battery_distance" type="double" value="$(arg max_battery_distance)" />
     <param name="metricFile" type="string" value="$(find visualization_tools)/log/metrics$(arg robot_id3)" />
     <param name="trajFile" type="string" value="$(find visualization_tools)/log/trajectory$(arg robot_id3)" />

@@ -1,9 +1,12 @@
 #include "mggplanner/rrg.h"
 
+#include <cstdlib>
 #include <opencv2/highgui.hpp>
 #include <opencv2/opencv.hpp>
 #include <pcl/common/transforms.h>
 #include <tf/transform_listener.h>
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
 
 #define SQ(x) (x * x)
 
@@ -74,6 +77,9 @@ void Rrg::initializeAttributes() {
 
   neighbour_graph_pub_ = 
       nh_.advertise<planner_msgs::Graph>("neighbour_graph_out", 10);
+  auction_frontier_markers_pub_ =
+      nh_.advertise<visualization_msgs::MarkerArray>(
+          "vis/auction_frontier_winners", 10);
 
   //
   global_graph_update_timer_ =
@@ -5902,74 +5908,159 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
     };
 
     std::unordered_map<int, double> frontier_exp_gain;
-    for (int i = 0; i < feasible_global_frontiers.size(); ++i) {
-      Vertex* f = feasible_global_frontiers[i];
-      // get gain.
+    const double kGDistancePenalty = 0.05;      // Original : 0.01
+    const double kGOtherRobotPenalty = 0.001;   // preferred 0.001
+    const bool auction_enabled = planning_params_.auction_frontier_enable;
+
+    auto parse_robot_id_from_frame = [](const std::string& frame) {
+      size_t pos = frame.find('R');
+      if (pos == std::string::npos || pos + 1 >= frame.size()) return -1;
+      size_t end = pos + 1;
+      while (end < frame.size() && frame[end] >= '0' && frame[end] <= '9') ++end;
+      if (end == pos + 1) return -1;
+      return std::atoi(frame.substr(pos + 1, end - (pos + 1)).c_str());
+    };
+
+    std::unordered_map<int, Eigen::Vector3d> robot_positions;
+    if (auction_enabled) {
+      robot_positions[(int)robot_id_] = current_state_.head(3);
+      for (const auto& peer_frame : comm_constraint_peer_frames_) {
+        int pid = parse_robot_id_from_frame(peer_frame);
+        if (pid <= 0 || pid == (int)robot_id_ ||
+            robot_positions.find(pid) != robot_positions.end()) {
+          continue;
+        }
+        tf::StampedTransform peer_tf;
+        try {
+          listener_->lookupTransform(world_frame_, peer_frame, ros::Time(0), peer_tf);
+          robot_positions[pid] = Eigen::Vector3d(peer_tf.getOrigin().x(),
+                                                 peer_tf.getOrigin().y(),
+                                                 peer_tf.getOrigin().z());
+        } catch (tf::TransformException& ex) {
+          ROS_WARN_THROTTLE(2.0, "[Auction] TF lookup failed (%s -> %s): %s",
+                            world_frame_.c_str(), peer_frame.c_str(), ex.what());
+        }
+      }
+    }
+
+    auto evaluate_frontier_score = [&](Vertex* f, double* score_out,
+                                       double* dist_out,
+                                       std::vector<int>* path_out) {
       std::vector<int> current_to_frontier_path_id;
       std::vector<int> frontier_to_home_path_id;
-      double current_to_frontier_distance;
-      double frontier_to_home_distance;
-
       global_graph_->getShortestPath(f->id, frontier_graph_rep, true,
                                      current_to_frontier_path_id);
       global_graph_->getShortestPath(f->id, global_graph_rep_, false,
                                      frontier_to_home_path_id);
-      current_to_frontier_distance =
+      double current_to_frontier_distance =
           global_graph_->getShortestDistance(f->id, frontier_graph_rep);
-      frontier_to_home_distance =
+      double frontier_to_home_distance =
           global_graph_->getShortestDistance(f->id, global_graph_rep_);
 
-      // Duplication from above but easier to understand.
       double time_to_target =
           current_to_frontier_distance / planning_params_.v_homing_max;
       double time_to_home =
           frontier_to_home_distance / planning_params_.v_homing_max;
-      double time_cost = time_to_target + planning_params_.auto_homing_enable
-                             ? time_to_home
-                             : 0;
+      double time_cost = (planning_params_.auto_homing_enable)
+                             ? (time_to_target + time_to_home)
+                             : time_to_target;
       double time_spare = 0;
       if (!isRemainingTimeSufficient(time_cost, time_spare)) {
         time_spare = 1;
       }
 
-      const double kGDistancePenalty = 0.05;  // Original : 0.01
-      const double kGOtherRobotPenalty = 0.001;  // preferred 0.001
-      double exp_gain = 0.0;
+      double score = 0.0;
       if (planning_params_.utility_frontier_enable) {
-        const double path_risk =
-            compute_frontier_path_risk(current_to_frontier_path_id);
-        exp_gain = f->vol_gain.gain -
-                   planning_params_.utility_frontier_alpha *
-                       current_to_frontier_distance -
-                   planning_params_.utility_frontier_beta * path_risk;
-        if (!ignore_time) exp_gain *= time_spare;
-        ROS_INFO_COND(
-            global_verbosity >= Verbosity::INFO,
-            "[UtilityFrontier][R%u] frontier=%d unknown=%.3f dist=%.3f risk=%.3f "
-            "alpha=%.3f beta=%.3f utility=%.3f",
-            robot_id_, f->id, f->vol_gain.gain, current_to_frontier_distance,
-            path_risk, planning_params_.utility_frontier_alpha,
-            planning_params_.utility_frontier_beta, exp_gain);
+        const double path_risk = compute_frontier_path_risk(current_to_frontier_path_id);
+        score = f->vol_gain.gain -
+                planning_params_.utility_frontier_alpha * current_to_frontier_distance -
+                planning_params_.utility_frontier_beta * path_risk;
       } else {
-        exp_gain = f->vol_gain.gain *
-                   exp(-kGDistancePenalty * current_to_frontier_distance);
-        printf("[%i] before time exp gain %f\n", robot_id_, exp_gain);
-        if (!ignore_time) exp_gain *= time_spare;
+        score = f->vol_gain.gain * exp(-kGDistancePenalty * current_to_frontier_distance);
         if (f->robot_id != robot_id_) {
-          // Penalize other robots frontiers.
-          printf("[%i] frontier penalized\n", robot_id_);
-          exp_gain *= kGOtherRobotPenalty;
+          score *= kGOtherRobotPenalty;
         }
       }
+      if (!ignore_time) score *= time_spare;
+      *score_out = score;
+      *dist_out = current_to_frontier_distance;
+      *path_out = current_to_frontier_path_id;
+    };
+
+    std::unordered_map<int, int> frontier_winner_map;
+    auto pass_auction_winner_filter = [&](Vertex* f) {
+      if (!auction_enabled || robot_positions.empty()) return true;
+      const Eigen::Vector3d frontier_pos = f->state.head(3);
+      const double eps = 1e-3;
+      int winner_robot_id = -1;
+      double winner_bid = -std::numeric_limits<double>::infinity();
+      for (const auto& kv : robot_positions) {
+        const int rid = kv.first;
+        const Eigen::Vector3d rel = frontier_pos - kv.second;
+        const double dist = rel.norm();
+        const double horiz = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + eps);
+        const double inc = std::atan2(std::abs(rel[2]), horiz);
+        double max_incl = planning_params_.max_inclination;
+        if (max_incl < eps) max_incl = eps;
+        double risk = inc / max_incl;
+        if (risk > 1.0) risk = 1.0;
+        const double bid = f->vol_gain.gain -
+                           planning_params_.auction_frontier_alpha * dist -
+                           planning_params_.auction_frontier_beta * risk;
+        if (bid > winner_bid ||
+            (std::abs(bid - winner_bid) < 1e-6 &&
+             (winner_robot_id < 0 || rid < winner_robot_id))) {
+          winner_bid = bid;
+          winner_robot_id = rid;
+        }
+      }
+      ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
+                    "[Auction][R%u] frontier=%d winner=R%d bid=%.3f",
+                    robot_id_, f->id, winner_robot_id, winner_bid);
+      frontier_winner_map[f->id] = winner_robot_id;
+      return winner_robot_id == (int)robot_id_;
+    };
+
+    for (int i = 0; i < feasible_global_frontiers.size(); ++i) {
+      Vertex* f = feasible_global_frontiers[i];
+      if (!pass_auction_winner_filter(f)) {
+        continue;
+      }
+
+      double exp_gain = 0.0;
+      double current_to_frontier_distance = 0.0;
+      std::vector<int> current_to_frontier_path_id;
+      evaluate_frontier_score(f, &exp_gain, &current_to_frontier_distance,
+                              &current_to_frontier_path_id);
+
       frontier_exp_gain[f->id] = exp_gain;
       if (exp_gain > best_gain) {
         best_gain = exp_gain;
         best_frontier = f;
       }
-      printf("[%i] Global reposition frontier id %i volume gain %f dist penality %f dist %f exp gain %f \n",
-            robot_id_,f->id, f->vol_gain.gain,exp(-kGDistancePenalty * current_to_frontier_distance), 
-            current_to_frontier_distance,
-            exp_gain );
+      ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
+                    "[R%u] frontier=%d gain=%.3f dist=%.3f",
+                    robot_id_, f->id, exp_gain, current_to_frontier_distance);
+    }
+
+    if (frontier_exp_gain.empty() && auction_enabled &&
+        planning_params_.auction_fallback_to_legacy) {
+      ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
+                    "[Auction][R%u] no assigned frontier, fallback to legacy scoring.",
+                    robot_id_);
+      for (int i = 0; i < feasible_global_frontiers.size(); ++i) {
+        Vertex* f = feasible_global_frontiers[i];
+        double exp_gain = 0.0;
+        double current_to_frontier_distance = 0.0;
+        std::vector<int> current_to_frontier_path_id;
+        evaluate_frontier_score(f, &exp_gain, &current_to_frontier_distance,
+                                &current_to_frontier_path_id);
+        frontier_exp_gain[f->id] = exp_gain;
+        if (exp_gain > best_gain) {
+          best_gain = exp_gain;
+          best_frontier = f;
+        }
+      }
     }
 
     // Rank from the best one.
@@ -5979,6 +6070,74 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
               [&frontier_exp_gain](const Vertex* a, const Vertex* b) {
                 return frontier_exp_gain[a->id] > frontier_exp_gain[b->id];
               });
+
+    if (auction_enabled && auction_frontier_markers_pub_.getNumSubscribers() > 0) {
+      visualization_msgs::MarkerArray winner_markers;
+
+      visualization_msgs::Marker clear_marker;
+      clear_marker.header.stamp = ros::Time::now();
+      clear_marker.header.frame_id = world_frame_;
+      clear_marker.ns = "auction_frontier_winners";
+      clear_marker.id = 0;
+      clear_marker.action = visualization_msgs::Marker::DELETEALL;
+      winner_markers.markers.push_back(clear_marker);
+
+      int marker_id = 1;
+      for (auto& f : feasible_global_frontiers) {
+        auto it = frontier_winner_map.find(f->id);
+        if (it == frontier_winner_map.end()) continue;
+        const int winner = it->second;
+        float r = 1.0f, g = 1.0f, b = 1.0f;
+        const int winner_mod = ((winner % 3) + 3) % 3;
+        if (winner_mod == 1) {
+          r = 1.0f; g = 0.0f; b = 0.0f;  // R1 red
+        } else if (winner_mod == 2) {
+          r = 0.0f; g = 1.0f; b = 0.0f;  // R2 green
+        } else if (winner_mod == 0) {
+          r = 0.0f; g = 0.0f; b = 1.0f;  // R3 blue (and multiples of 3)
+        }
+
+        visualization_msgs::Marker point_marker;
+        point_marker.header.stamp = ros::Time::now();
+        point_marker.header.frame_id = world_frame_;
+        point_marker.ns = "auction_frontier_winners_points";
+        point_marker.id = marker_id++;
+        point_marker.type = visualization_msgs::Marker::SPHERE;
+        point_marker.action = visualization_msgs::Marker::ADD;
+        point_marker.pose.position.x = f->state[0];
+        point_marker.pose.position.y = f->state[1];
+        point_marker.pose.position.z = f->state[2] + 0.2;
+        point_marker.pose.orientation.w = 1.0;
+        point_marker.scale.x = 0.35;
+        point_marker.scale.y = 0.35;
+        point_marker.scale.z = 0.35;
+        point_marker.color.a = 0.85;
+        point_marker.color.r = r;
+        point_marker.color.g = g;
+        point_marker.color.b = b;
+        winner_markers.markers.push_back(point_marker);
+
+        visualization_msgs::Marker text_marker;
+        text_marker.header.stamp = ros::Time::now();
+        text_marker.header.frame_id = world_frame_;
+        text_marker.ns = "auction_frontier_winners_text";
+        text_marker.id = marker_id++;
+        text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+        text_marker.action = visualization_msgs::Marker::ADD;
+        text_marker.pose.position.x = f->state[0];
+        text_marker.pose.position.y = f->state[1];
+        text_marker.pose.position.z = f->state[2] + 0.75;
+        text_marker.pose.orientation.w = 1.0;
+        text_marker.scale.z = 0.35;
+        text_marker.color.a = 1.0;
+        text_marker.color.r = r;
+        text_marker.color.g = g;
+        text_marker.color.b = b;
+        text_marker.text = "winner=R" + std::to_string(winner);
+        winner_markers.markers.push_back(text_marker);
+      }
+      auction_frontier_markers_pub_.publish(winner_markers);
+    }
     // Print out
     // ROS_WARN_COND(global_verbosity >= Verbosity::WARN, "List of potential frontier in decreasing order of gain:");
     // for (int i = 0; i < feasible_global_frontiers.size(); ++i) {

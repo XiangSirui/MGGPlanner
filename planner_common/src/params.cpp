@@ -1165,6 +1165,30 @@ bool PlanningParams::loadParams(std::string ns) {
     ROSPARAM_WARN(param_name, utility_frontier_beta);
   }
 
+  param_name = ns + "/auction_frontier_enable";
+  if (!ros::param::get(param_name, auction_frontier_enable)) {
+    auction_frontier_enable = false;
+    ROSPARAM_WARN(param_name, auction_frontier_enable);
+  }
+
+  param_name = ns + "/auction_frontier_alpha";
+  if (!ros::param::get(param_name, auction_frontier_alpha)) {
+    auction_frontier_alpha = 0.05;
+    ROSPARAM_WARN(param_name, auction_frontier_alpha);
+  }
+
+  param_name = ns + "/auction_frontier_beta";
+  if (!ros::param::get(param_name, auction_frontier_beta)) {
+    auction_frontier_beta = 20.0;
+    ROSPARAM_WARN(param_name, auction_frontier_beta);
+  }
+
+  param_name = ns + "/auction_fallback_to_legacy";
+  if (!ros::param::get(param_name, auction_fallback_to_legacy)) {
+    auction_fallback_to_legacy = true;
+    ROSPARAM_WARN(param_name, auction_fallback_to_legacy);
+  }
+
   ROSPARAM_INFO("Done.");
   return true;
 }

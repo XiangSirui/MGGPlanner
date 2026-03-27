@@ -332,6 +332,11 @@ struct PlanningParams {
   bool utility_frontier_enable;
   double utility_frontier_alpha;
   double utility_frontier_beta;
+  // Auction-based task allocation (optional, disabled by default).
+  bool auction_frontier_enable;
+  double auction_frontier_alpha;
+  double auction_frontier_beta;
+  bool auction_fallback_to_legacy;
 
   bool loadParams(std::string ns);
   void setPlanningMode(PlanningModeType pmode);

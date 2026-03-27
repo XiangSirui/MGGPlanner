@@ -303,6 +303,7 @@ class Rrg {
   ros::Publisher time_log_pub_;
   ros::Publisher pci_reset_pub_;
   ros::Publisher neighbour_graph_pub_;
+  ros::Publisher auction_frontier_markers_pub_;
 
   ros::Subscriber semantics_subscriber_;
   ros::Subscriber stop_srv_subscriber_;
