@@ -2,6 +2,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <algorithm>
 #include <ros/ros.h>
 
 #include <message_filters/subscriber.h>
@@ -64,6 +65,10 @@ bool systemInited = false;
 float vehicleYaw = 0;
 float vehicleX = 0, vehicleY = 0, vehicleZ = 0;
 float exploredVolume = 0, travelingDis = 0, runtime = 0, timeDuration = 0;
+float maxBatteryDistance = 400.0f;
+float batteryRemainingDistance = 400.0f;
+float batteryRemainingPercent = 100.0f;
+bool batteryDepleted = false;
 
 pcl::VoxelGrid<pcl::PointXYZ> overallMapDwzFilter;
 pcl::VoxelGrid<pcl::PointXYZ> exploredAreaDwzFilter;
@@ -76,9 +81,47 @@ ros::Publisher *pubTrajectoryPtr = NULL;
 ros::Publisher *pubExploredVolumePtr = NULL;
 ros::Publisher *pubTravelingDisPtr = NULL;
 ros::Publisher *pubTimeDurationPtr = NULL;
+ros::Publisher *pubBatteryRemainingDistancePtr = NULL;
+ros::Publisher *pubBatteryRemainingPercentPtr = NULL;
+ros::Publisher *pubStopPtr = NULL;
 
 FILE *metricFilePtr = NULL;
 FILE *trajFilePtr = NULL;
+
+void updateBatteryStatus()
+{
+  if (maxBatteryDistance <= 0.0f) {
+    batteryRemainingDistance = 0.0f;
+    batteryRemainingPercent = 0.0f;
+    batteryDepleted = true;
+    return;
+  }
+
+  batteryRemainingDistance = std::max(0.0f, maxBatteryDistance - travelingDis);
+  batteryRemainingPercent = std::max(0.0f, std::min(100.0f, 100.0f * batteryRemainingDistance / maxBatteryDistance));
+  batteryDepleted = (batteryRemainingDistance <= 0.0f);
+}
+
+void publishBatteryAndStopIfNeeded()
+{
+  if (pubBatteryRemainingDistancePtr != NULL) {
+    std_msgs::Float32 batteryDistanceMsg;
+    batteryDistanceMsg.data = batteryRemainingDistance;
+    pubBatteryRemainingDistancePtr->publish(batteryDistanceMsg);
+  }
+
+  if (pubBatteryRemainingPercentPtr != NULL) {
+    std_msgs::Float32 batteryPercentMsg;
+    batteryPercentMsg.data = batteryRemainingPercent;
+    pubBatteryRemainingPercentPtr->publish(batteryPercentMsg);
+  }
+
+  if (batteryDepleted && pubStopPtr != NULL) {
+    std_msgs::Int8 stopMsg;
+    stopMsg.data = 1;
+    pubStopPtr->publish(stopMsg);
+  }
+}
 
 void odometryHandler(const nav_msgs::Odometry::ConstPtr& odom)
 {
@@ -104,25 +147,30 @@ void odometryHandler(const nav_msgs::Odometry::ConstPtr& odom)
     return;
   }
 
-  if (systemInited) {
+  if (!systemInited) {
+    systemInitTime = systemTime;
+    systemInited = true;
+    dis = 0.0f;
+  } else {
     timeDuration = systemTime - systemInitTime;
-    
     std_msgs::Float32 timeDurationMsg;
     timeDurationMsg.data = timeDuration;
     pubTimeDurationPtr->publish(timeDurationMsg);
   }
 
+  // Always accumulate traveled distance for battery estimation.
+  travelingDis += dis;
+  updateBatteryStatus();
+  publishBatteryAndStopIfNeeded();
+
+  // Downsample trajectory logging/visualization to avoid excessive points.
   if (dis < transInterval && dYaw < yawInterval) {
+    vehicleYaw = yaw;
+    vehicleX = odom->pose.pose.position.x;
+    vehicleY = odom->pose.pose.position.y;
+    vehicleZ = odom->pose.pose.position.z;
     return;
   }
-
-  if (!systemInited) {
-    dis = 0;
-    systemInitTime = systemTime;
-    systemInited = true;
-  }
-
-  travelingDis += dis;
 
   vehicleYaw = yaw;
   vehicleX = odom->pose.pose.position.x;
@@ -205,6 +253,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn)
   std_msgs::Float32 travelingDisMsg;
   travelingDisMsg.data = travelingDis;
   pubTravelingDisPtr->publish(travelingDisMsg);
+  publishBatteryAndStopIfNeeded();
 }
 
 
@@ -303,6 +352,7 @@ void laserCloudHandlerB1(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn)
   std_msgs::Float32 travelingDisMsg;
   travelingDisMsg.data = travelingDis;
   pubTravelingDisPtr->publish(travelingDisMsg);
+  publishBatteryAndStopIfNeeded();
 }
 
 
@@ -399,6 +449,7 @@ void laserCloudHandlerB2(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn)
   std_msgs::Float32 travelingDisMsg;
   travelingDisMsg.data = travelingDis;
   pubTravelingDisPtr->publish(travelingDisMsg);
+  publishBatteryAndStopIfNeeded();
 }
 
 
@@ -432,10 +483,12 @@ int main(int argc, char** argv)
   nhPrivate.getParam("yawInterval", yawInterval);
   nhPrivate.getParam("overallMapDisplayInterval", overallMapDisplayInterval);
   nhPrivate.getParam("exploredAreaDisplayInterval", exploredAreaDisplayInterval);
+  nhPrivate.param("max_battery_distance", maxBatteryDistance, 400.0f);
 
   nhPrivate.getParam("vehicleX", vehicleX);
   nhPrivate.getParam("vehicleY", vehicleY);
   nhPrivate.getParam("vehicleZ", vehicleZ);
+  updateBatteryStatus();
 
   ros::Subscriber subOdometry = nh.subscribe<nav_msgs::Odometry> ("state_estimation", 5, odometryHandler);
 
@@ -469,6 +522,13 @@ int main(int argc, char** argv)
   pubTimeDurationPtr = &pubTimeDuration;
 
   ros::Publisher pubstop = nh.advertise<std_msgs::Int8> ("stop", 5);
+  pubStopPtr = &pubstop;
+  
+  ros::Publisher pubBatteryRemainingDistance = nh.advertise<std_msgs::Float32> ("battery_remaining_distance", 5);
+  pubBatteryRemainingDistancePtr = &pubBatteryRemainingDistance;
+  
+  ros::Publisher pubBatteryRemainingPercent = nh.advertise<std_msgs::Float32> ("battery_remaining_percent", 5);
+  pubBatteryRemainingPercentPtr = &pubBatteryRemainingPercent;
   
 
   //ros::Publisher pubRuntime = nh.advertise<std_msgs::Float32> ("/runtime", 5);
@@ -503,6 +563,7 @@ int main(int argc, char** argv)
   bool status = ros::ok();
   while (status) {
     ros::spinOnce();
+    publishBatteryAndStopIfNeeded();
 
     overallMapDisplayCount++;
     if (overallMapDisplayCount >= 100 * overallMapDisplayInterval) {

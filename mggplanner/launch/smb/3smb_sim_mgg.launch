@@ -8,12 +8,13 @@
   <arg name="robot_id1_int" default="1"/>
   <arg name="robot_id2_int" default="2"/>
   <arg name="robot_id3_int" default="3"/>
-  <arg name="gazebo_gui_en" default="true"/>
+  <arg name="gazebo_gui_en" default="false"/>
   <arg name="use_sim_time" default="true"/>
   <arg name="rviz_en" default="true" />
   <arg name="launch_prefix" default=""/> <!-- gdb -ex run //args -->
+  <arg name="max_battery_distance" default="400.0"/>
   <!-- Multi-robot comm range constraint in mggplanner (rrg): if true, samples/edges respect max distance to peers via TF -->
-  <arg name="comm_constraint_enable" default="false"/>
+  <arg name="comm_constraint_enable" default="true"/>
   <arg name="comm_constraint_max_distance" default="30.0"/>
   <param name="use_sim_time" value="$(arg use_sim_time)"/>
 
@@ -133,6 +134,7 @@
   
   <node pkg="visualization_tools" type="visualizationTools" name="visualizationTools" output="screen">
     <param name="robotID" type="int" value="$(arg robot_id1_int)"/>
+    <param name="max_battery_distance" type="double" value="$(arg max_battery_distance)" />
     <param name="metricFile" type="string" value="$(find visualization_tools)/log/metrics$(arg robot_id1)" />
     <param name="trajFile" type="string" value="$(find visualization_tools)/log/trajectory$(arg robot_id1)" />
     <param name="mapFile" type="string" value="$(find visualization_tools)/mesh/$(arg world_name)/preview/pointcloud.ply" />
@@ -240,6 +242,7 @@
 
   <node pkg="visualization_tools" type="visualizationTools" name="visualizationTools" output="screen">
     <param name="robotID" type="int" value="$(arg robot_id1_int)"/>
+    <param name="max_battery_distance" type="double" value="$(arg max_battery_distance)" />
     <param name="metricFile" type="string" value="$(find visualization_tools)/log/metrics$(arg robot_id2)" />
     <param name="trajFile" type="string" value="$(find visualization_tools)/log/trajectory$(arg robot_id2)" />
     <param name="mapFile" type="string" value="$(find visualization_tools)/mesh/$(arg world_name)/preview/pointcloud.ply" />
@@ -345,6 +348,7 @@
 
   <node pkg="visualization_tools" type="visualizationTools" name="visualizationTools" output="screen">
     <param name="robotID" type="int" value="$(arg robot_id1_int)"/>
+    <param name="max_battery_distance" type="double" value="$(arg max_battery_distance)" />
     <param name="metricFile" type="string" value="$(find visualization_tools)/log/metrics$(arg robot_id3)" />
     <param name="trajFile" type="string" value="$(find visualization_tools)/log/trajectory$(arg robot_id3)" />
     <param name="mapFile" type="string" value="$(find visualization_tools)/mesh/$(arg world_name)/preview/pointcloud.ply" />
