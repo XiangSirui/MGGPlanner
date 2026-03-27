@@ -1147,6 +1147,24 @@ bool PlanningParams::loadParams(std::string ns) {
     ROSPARAM_WARN(param_name, max_negative_inclination);
   }
 
+  param_name = ns + "/utility_frontier_enable";
+  if (!ros::param::get(param_name, utility_frontier_enable)) {
+    utility_frontier_enable = false;
+    ROSPARAM_WARN(param_name, utility_frontier_enable);
+  }
+
+  param_name = ns + "/utility_frontier_alpha";
+  if (!ros::param::get(param_name, utility_frontier_alpha)) {
+    utility_frontier_alpha = 0.05;
+    ROSPARAM_WARN(param_name, utility_frontier_alpha);
+  }
+
+  param_name = ns + "/utility_frontier_beta";
+  if (!ros::param::get(param_name, utility_frontier_beta)) {
+    utility_frontier_beta = 20.0;
+    ROSPARAM_WARN(param_name, utility_frontier_beta);
+  }
+
   ROSPARAM_INFO("Done.");
   return true;
 }

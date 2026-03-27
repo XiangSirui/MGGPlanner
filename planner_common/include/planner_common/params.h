@@ -328,6 +328,10 @@ struct PlanningParams {
   bool auto_landing_enable;
   double time_budget_before_landing;
   double max_negative_inclination;
+  // Global frontier utility-based strategy (optional, disabled by default).
+  bool utility_frontier_enable;
+  double utility_frontier_alpha;
+  double utility_frontier_beta;
 
   bool loadParams(std::string ns);
   void setPlanningMode(PlanningModeType pmode);

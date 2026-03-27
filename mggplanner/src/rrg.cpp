@@ -5876,6 +5876,31 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
     }
 
     // Compute exploration gain.
+    // Optional utility-based frontier selection:
+    // score = unknown_gain - alpha * distance - beta * risk.
+    auto compute_frontier_path_risk = [this](const std::vector<int>& path_ids) {
+      if (path_ids.size() < 2) return 0.0;
+      const double eps = 1e-3;
+      double sum_risk = 0.0;
+      int n_segments = 0;
+      for (size_t i = 1; i < path_ids.size(); ++i) {
+        const StateVec& prev = global_graph_->getVertex(path_ids[i - 1])->state;
+        const StateVec& curr = global_graph_->getVertex(path_ids[i])->state;
+        const double dx = curr[0] - prev[0];
+        const double dy = curr[1] - prev[1];
+        const double dz = curr[2] - prev[2];
+        const double horiz = std::sqrt(dx * dx + dy * dy + eps);
+        const double inc = std::atan2(std::abs(dz), horiz);
+        double max_incl = planning_params_.max_inclination;
+        if (max_incl < eps) max_incl = eps;
+        double normalized_inc = inc / max_incl;
+        if (normalized_inc > 1.0) normalized_inc = 1.0;
+        sum_risk += normalized_inc;
+        ++n_segments;
+      }
+      return (n_segments > 0) ? (sum_risk / n_segments) : 0.0;
+    };
+
     std::unordered_map<int, double> frontier_exp_gain;
     for (int i = 0; i < feasible_global_frontiers.size(); ++i) {
       Vertex* f = feasible_global_frontiers[i];
@@ -5907,16 +5932,34 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
         time_spare = 1;
       }
 
-      const double kGDistancePenalty = 0.05; // Original : 0.01
-      const double kGOtherRobotPenalty = 0.001; //preffred  0.001 got to test 0.1
-      double exp_gain = f->vol_gain.gain *
-                        exp(-kGDistancePenalty * current_to_frontier_distance);
-      printf("[%i] before time exp gain %f\n",robot_id_,exp_gain);
-      if (!ignore_time) exp_gain *= time_spare;
-      if(f->robot_id != robot_id_){
-        // Penalize other robots frontiers.
-        printf("[%i] frontier penalized\n",robot_id_);
-        exp_gain *=kGOtherRobotPenalty;
+      const double kGDistancePenalty = 0.05;  // Original : 0.01
+      const double kGOtherRobotPenalty = 0.001;  // preferred 0.001
+      double exp_gain = 0.0;
+      if (planning_params_.utility_frontier_enable) {
+        const double path_risk =
+            compute_frontier_path_risk(current_to_frontier_path_id);
+        exp_gain = f->vol_gain.gain -
+                   planning_params_.utility_frontier_alpha *
+                       current_to_frontier_distance -
+                   planning_params_.utility_frontier_beta * path_risk;
+        if (!ignore_time) exp_gain *= time_spare;
+        ROS_INFO_COND(
+            global_verbosity >= Verbosity::INFO,
+            "[UtilityFrontier][R%u] frontier=%d unknown=%.3f dist=%.3f risk=%.3f "
+            "alpha=%.3f beta=%.3f utility=%.3f",
+            robot_id_, f->id, f->vol_gain.gain, current_to_frontier_distance,
+            path_risk, planning_params_.utility_frontier_alpha,
+            planning_params_.utility_frontier_beta, exp_gain);
+      } else {
+        exp_gain = f->vol_gain.gain *
+                   exp(-kGDistancePenalty * current_to_frontier_distance);
+        printf("[%i] before time exp gain %f\n", robot_id_, exp_gain);
+        if (!ignore_time) exp_gain *= time_spare;
+        if (f->robot_id != robot_id_) {
+          // Penalize other robots frontiers.
+          printf("[%i] frontier penalized\n", robot_id_);
+          exp_gain *= kGOtherRobotPenalty;
+        }
       }
       frontier_exp_gain[f->id] = exp_gain;
       if (exp_gain > best_gain) {
