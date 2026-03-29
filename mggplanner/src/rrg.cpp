@@ -5949,7 +5949,9 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
     std::unordered_map<int, double> frontier_exp_gain;
     const double kGDistancePenalty = 0.05;      // Original : 0.01
     const double kGOtherRobotPenalty = 0.001;   // preferred 0.001
-    const bool auction_enabled = planning_params_.auction_frontier_enable;
+    const bool auction_enabled =
+        planning_params_.auction_frontier_enable &&
+        !planning_params_.baseline_greedy_nearest_frontier_enable;
 
     auto parse_robot_id_from_frame = [](const std::string& frame) {
       size_t pos = frame.find('R');
@@ -6009,7 +6011,11 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
       }
 
       double score = 0.0;
-      if (planning_params_.utility_frontier_enable) {
+      if (planning_params_.baseline_greedy_nearest_frontier_enable) {
+        // Uncoordinated baseline: maximize nearness on the global graph only
+        // (1/(1+d) is strictly decreasing in path length d).
+        score = 1.0 / (1.0 + current_to_frontier_distance);
+      } else if (planning_params_.utility_frontier_enable) {
         const double path_risk = compute_frontier_path_risk(current_to_frontier_path_id);
         score = f->vol_gain.gain -
                 planning_params_.utility_frontier_alpha * current_to_frontier_distance -

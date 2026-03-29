@@ -66,6 +66,7 @@ install(DIRECTORY launch/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
 )
 install(PROGRAMS scripts/realTimePlot.py scripts/inter_robot_distances.py
+    scripts/record_exploration_metrics.py
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/scripts
 )
 

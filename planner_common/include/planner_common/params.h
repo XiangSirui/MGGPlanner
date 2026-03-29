@@ -339,6 +339,10 @@ struct PlanningParams {
   double auction_frontier_alpha;
   double auction_frontier_beta;
   bool auction_fallback_to_legacy;
+  // If true: global frontier choice uses only graph distance (greedy nearest
+  // frontier). Disables multi-robot auction filtering and legacy gain term for
+  // that stage. Default false preserves original behavior.
+  bool baseline_greedy_nearest_frontier_enable;
 
   bool loadParams(std::string ns);
   void setPlanningMode(PlanningModeType pmode);

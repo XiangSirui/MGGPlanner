@@ -1201,6 +1201,12 @@ bool PlanningParams::loadParams(std::string ns) {
     ROSPARAM_WARN(param_name, auction_fallback_to_legacy);
   }
 
+  param_name = ns + "/baseline_greedy_nearest_frontier_enable";
+  if (!ros::param::get(param_name, baseline_greedy_nearest_frontier_enable)) {
+    baseline_greedy_nearest_frontier_enable = false;
+    ROSPARAM_WARN(param_name, baseline_greedy_nearest_frontier_enable);
+  }
+
   ROSPARAM_INFO("Done.");
   return true;
 }
