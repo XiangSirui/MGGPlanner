@@ -107,6 +107,9 @@ void Rrg::initializeAttributes() {
 
   neighbour_graph_subscriber_ = nh_.subscribe("neighbour_graph_in",
                                        100, &Rrg::neighbourGraphCallback, this);
+  battery_remaining_percent_subscriber_ =
+      nh_.subscribe("battery_remaining_percent", 10,
+                    &Rrg::batteryRemainingPercentCallback, this);
   
 
   time_log_pub_ =
@@ -401,6 +404,10 @@ void Rrg::mergeNeighbourGraph(std::shared_ptr<GraphManager> graph_manager,
 void Rrg::stopMsgCallback(const std_msgs::Bool& msg) {
   global_exploration_ongoing_ = false;
   auto_global_planner_trig_ = false;
+}
+
+void Rrg::batteryRemainingPercentCallback(const std_msgs::Float32& msg) {
+  battery_remaining_percent_ = msg.data;
 }
 
 bool Rrg::sampleVertex(Vertex& vertex) {
@@ -4518,6 +4525,38 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
     }
     if (current_battery_time_remaining_ <= 0.0) {
       ROS_WARN_COND(global_verbosity >= Verbosity::PLANNER_STATUS, "RAN OUT OF BATTERY --> STOP HERE.");
+      return homing_path;
+    }
+    if (planning_params_.battery_percent_homing_enable &&
+        battery_remaining_percent_ <=
+            planning_params_.battery_percent_homing_threshold) {
+      ROS_WARN_COND(
+          global_verbosity >= Verbosity::PLANNER_STATUS,
+          "BATTERY THRESHOLD REACHED: %.1f%% <= %.1f%% --> HOMING ENGAGED.",
+          battery_remaining_percent_,
+          planning_params_.battery_percent_homing_threshold);
+      Vertex* root_vertex = local_graph_->getVertex(0);
+      homing_path = searchHomingPath(tgt_frame, root_vertex->state);
+      if (homing_path.empty()) {
+        ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
+                      "Can not find threshold-triggered homing path.");
+        return homing_path;
+      }
+      if (planning_params_.path_safety_enhance_enable) {
+        std::vector<geometry_msgs::Pose> mod_path;
+        if (improveFreePath(homing_path, mod_path, true)) {
+          homing_path = mod_path;
+        }
+      }
+      const double kInterpolationDistance =
+          planning_params_.path_interpolation_distance;
+      std::vector<geometry_msgs::Pose> interp_path;
+      if (Trajectory::interpolatePath(homing_path, kInterpolationDistance,
+                                      interp_path)) {
+        homing_path = interp_path;
+      }
+      visualization_->visualizeRefPath(homing_path);
+      homing_engaged_ = true;
       return homing_path;
     }
     // Check two conditions whatever which one comes first.

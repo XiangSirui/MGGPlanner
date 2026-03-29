@@ -1009,6 +1009,18 @@ bool PlanningParams::loadParams(std::string ns) {
     ROSPARAM_WARN(param_name, "False");
   }
 
+  param_name = ns + "/battery_percent_homing_enable";
+  if (!ros::param::get(param_name, battery_percent_homing_enable)) {
+    battery_percent_homing_enable = false;
+    ROSPARAM_WARN(param_name, "False");
+  }
+
+  param_name = ns + "/battery_percent_homing_threshold";
+  if (!ros::param::get(param_name, battery_percent_homing_threshold)) {
+    battery_percent_homing_threshold = 50.0;
+    ROSPARAM_WARN(param_name, battery_percent_homing_threshold);
+  }
+
   param_name = ns + "/geofence_checking_enable";
   if (!ros::param::get(param_name, geofence_checking_enable)) {
     geofence_checking_enable = false;

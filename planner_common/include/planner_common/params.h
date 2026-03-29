@@ -324,6 +324,8 @@ struct PlanningParams {
   bool go_home_if_fully_explored;
   bool auto_homing_enable;
   bool homing_backward;
+  bool battery_percent_homing_enable;
+  double battery_percent_homing_threshold;
   double time_budget_limit;
   bool auto_landing_enable;
   double time_budget_before_landing;

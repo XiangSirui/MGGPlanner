@@ -12,7 +12,7 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="rviz_en" default="true" />
   <arg name="launch_prefix" default=""/> <!-- gdb -ex run //args -->
-  <arg name="max_battery_distance" default="400.0"/>
+  <arg name="max_battery_distance" default="70.0"/>
   <!-- Multi-robot comm range constraint in mggplanner (rrg): if true, samples/edges respect max distance to peers via TF -->
   <arg name="comm_constraint_enable" default="true"/>
   <arg name="comm_constraint_max_distance" default="30.0"/>

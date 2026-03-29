@@ -27,6 +27,7 @@
 #include <pcl_ros/transforms.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <std_msgs/Bool.h>
+#include <std_msgs/Float32.h>
 #include <std_msgs/Float32MultiArray.h>
 #include <std_srvs/Trigger.h>
 #include <tf/transform_datatypes.h>
@@ -308,11 +309,13 @@ class Rrg {
   ros::Subscriber semantics_subscriber_;
   ros::Subscriber stop_srv_subscriber_;
   ros::Subscriber neighbour_graph_subscriber_;
+  ros::Subscriber battery_remaining_percent_subscriber_;
 
   ros::ServiceClient pci_homing_;
   ros::ServiceClient landing_srv_client_;
 
   void stopMsgCallback(const std_msgs::Bool& msg);
+  void batteryRemainingPercentCallback(const std_msgs::Float32& msg);
 
   // Graphs.
   std::shared_ptr<GraphManager> local_graph_;
@@ -473,6 +476,7 @@ class Rrg {
   // Mission time tracking
   ros::Time rostime_start_;
   double current_battery_time_remaining_;
+  double battery_remaining_percent_ = 100.0;
 
   Vertex* root_vertex_;
   Vertex* best_vertex_;
