@@ -5,10 +5,11 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="rviz_en" default="true"/>
   <arg name="launch_prefix" default=""/>
-  <arg name="max_battery_distance" default="400.0"/>
+  <arg name="max_battery_distance" default="200.0"/>
   <arg name="comm_constraint_enable" default="true"/>
-  <arg name="comm_constraint_max_distance" default="30.0"/>
-  <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/darpa_cave_01.world"/>
+  <arg name="comm_constraint_max_distance" default="50.0"/>
+  <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/darpa_cave_02.world"/>
+  <arg name="metrics_run_subdir" default=""/>
 
   <include file="$(find mggplanner)/launch/smb/3smb_sim_mgg.launch">
     <arg name="robot_name" value="$(arg robot_name)"/>
@@ -20,6 +21,7 @@
     <arg name="comm_constraint_enable" value="$(arg comm_constraint_enable)"/>
     <arg name="comm_constraint_max_distance" value="$(arg comm_constraint_max_distance)"/>
     <arg name="world_file" value="$(arg world_file)"/>
+    <arg name="metrics_run_subdir" value="$(arg metrics_run_subdir)"/>
     <arg name="mggplanner_config_file"
          value="$(find mggplanner)/config/$(arg robot_name)/mgg_darpa_auction.yaml"/>
   </include>

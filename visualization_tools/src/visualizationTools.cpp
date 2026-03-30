@@ -3,7 +3,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <sys/stat.h>
 #include <ros/ros.h>
+#include <ros/package.h>
 
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
@@ -30,6 +36,34 @@
 using namespace std;
 
 const double PI = 3.1415926;
+
+/** Create parent directories for a file path (mkdir -p). */
+static bool ensureParentDirsForFile(const string& filepath) {
+  for (size_t i = 1; i < filepath.size(); ++i) {
+    if (filepath[i] == '/') {
+      string sub = filepath.substr(0, i);
+      if (mkdir(sub.c_str(), 0755) != 0 && errno != EEXIST) {
+        ROS_WARN("mkdir %s failed: %s", sub.c_str(), strerror(errno));
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+static string basenamePath(const string& p) {
+  size_t s = p.find_last_of('/');
+  return (s == string::npos) ? p : p.substr(s + 1);
+}
+
+/** Same format as legacy metrics filenames: YYYY-M-D-H-M-S */
+static string makeWallClockTimeString() {
+  time_t logTime = time(0);
+  tm* ltm = localtime(&logTime);
+  return to_string(1900 + ltm->tm_year) + "-" + to_string(1 + ltm->tm_mon) + "-" +
+         to_string(ltm->tm_mday) + "-" + to_string(ltm->tm_hour) + "-" +
+         to_string(ltm->tm_min) + "-" + to_string(ltm->tm_sec);
+}
 
 string metricFile;
 string trajFile;
@@ -100,6 +134,14 @@ void updateBatteryStatus()
   batteryRemainingDistance = std::max(0.0f, maxBatteryDistance - travelingDis);
   batteryRemainingPercent = std::max(0.0f, std::min(100.0f, 100.0f * batteryRemainingDistance / maxBatteryDistance));
   batteryDepleted = (batteryRemainingDistance <= 0.0f);
+}
+
+void writeMetricsLineToFile() {
+  if (metricFilePtr == NULL) return;
+  updateBatteryStatus();
+  fprintf(metricFilePtr, "%f %f %f %f %f %f\n", exploredVolume, travelingDis,
+          runtime, timeDuration, batteryRemainingPercent,
+          batteryRemainingDistance);
 }
 
 void publishBatteryAndStopIfNeeded()
@@ -243,7 +285,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn)
     exploredAreaDisplayCount = 0;
   }
 
-  fprintf(metricFilePtr, "%f %f %f %f\n", exploredVolume, travelingDis, runtime, timeDuration);
+  writeMetricsLineToFile();
 
   // runtime=0;
   std_msgs::Float32 exploredVolumeMsg;
@@ -342,7 +384,7 @@ void laserCloudHandlerB1(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn)
     exploredAreaDisplayCount = 0;
   }
 
-  fprintf(metricFilePtr, "%f %f %f %f\n", exploredVolume, travelingDis, runtime, timeDuration);
+  writeMetricsLineToFile();
 
   // runtime=0;
   std_msgs::Float32 exploredVolumeMsg;
@@ -439,7 +481,7 @@ void laserCloudHandlerB2(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn)
     exploredAreaDisplayCount = 0;
   }
 
-  fprintf(metricFilePtr, "%f %f %f %f\n", exploredVolume, travelingDis, runtime, timeDuration);
+  writeMetricsLineToFile();
 
   // runtime=0;
   std_msgs::Float32 exploredVolumeMsg;
@@ -473,8 +515,81 @@ int main(int argc, char** argv)
   ros::NodeHandle nh;
   ros::NodeHandle nhPrivate = ros::NodeHandle("~");
 
-  nhPrivate.getParam("metricFile", metricFile);
-  nhPrivate.getParam("trajFile", trajFile);
+  std::string metricFileIn;
+  std::string trajFileIn;
+  nhPrivate.getParam("metricFile", metricFileIn);
+  nhPrivate.getParam("trajFile", trajFileIn);
+
+  int robot_id_param = 0;
+  nhPrivate.param("robotID", robot_id_param, 0);
+
+  bool metrics_use_session_subdir = true;
+  nhPrivate.param("metrics_use_session_subdir", metrics_use_session_subdir, true);
+
+  std::string metrics_run_subdir;
+  nhPrivate.param<std::string>("metrics_run_subdir", metrics_run_subdir, "");
+
+  if (metrics_use_session_subdir) {
+    std::string pkg_path;
+    try {
+      pkg_path = ros::package::getPath("visualization_tools");
+    } catch (std::runtime_error& e) {
+      ROS_WARN("ros::package::getPath(visualization_tools) failed: %s", e.what());
+    }
+
+    if (!pkg_path.empty()) {
+      std::string session_stamp;
+      if (!metrics_run_subdir.empty()) {
+        session_stamp = metrics_run_subdir;
+      } else {
+        // One folder per launch: R1 publishes wall-clock stamp; R2/R3 wait for it.
+        const std::string kSessionParam = "/mgg_metrics_session_stamp";
+        if (robot_id_param == 1) {
+          session_stamp = makeWallClockTimeString();
+          ros::param::set(kSessionParam, session_stamp);
+          ROS_INFO("[visualizationTools] session folder %s (R1 sets %s)", session_stamp.c_str(),
+                   kSessionParam.c_str());
+        } else {
+          ros::Rate wait_rate(20);
+          for (int i = 0; i < 200 && ros::ok(); ++i) {
+            if (ros::param::get(kSessionParam, session_stamp) && !session_stamp.empty()) {
+              break;
+            }
+            wait_rate.sleep();
+          }
+          if (session_stamp.empty()) {
+            session_stamp = makeWallClockTimeString();
+            ROS_WARN(
+                "[visualizationTools] robotID=%d: %s not set in time, using local stamp %s",
+                robot_id_param, kSessionParam.c_str(), session_stamp.c_str());
+          } else {
+            ROS_INFO("[visualizationTools] robotID=%d using session_stamp=%s", robot_id_param,
+                     session_stamp.c_str());
+          }
+        }
+      }
+
+      const std::string base_m = basenamePath(metricFileIn);
+      const std::string base_t = basenamePath(trajFileIn);
+      metricFile = pkg_path + "/log/" + session_stamp + "/" + base_m + "_" + session_stamp + ".txt";
+      trajFile = pkg_path + "/log/" + session_stamp + "/" + base_t + "_" + session_stamp + ".txt";
+      ROS_INFO("[visualizationTools] metricFile=%s", metricFile.c_str());
+    } else {
+      ROS_WARN("metrics_use_session_subdir but package path failed; fallback to flat log/");
+      metricFile = metricFileIn;
+      trajFile = trajFileIn;
+      const std::string ts = makeWallClockTimeString();
+      metricFile += "_" + ts + ".txt";
+      trajFile += "_" + ts + ".txt";
+    }
+  } else {
+    metricFile = metricFileIn;
+    trajFile = trajFileIn;
+    const std::string ts = makeWallClockTimeString();
+    metricFile += "_" + ts + ".txt";
+    trajFile += "_" + ts + ".txt";
+  }
+
   nhPrivate.getParam("mapFile", mapFile);
   nhPrivate.getParam("overallMapVoxelSize", overallMapVoxelSize);
   nhPrivate.getParam("exploredAreaVoxelSize", exploredAreaVoxelSize);
@@ -549,15 +664,25 @@ int main(int argc, char** argv)
 
   pcl::toROSMsg(*overallMapCloudDwz, overallMap2);
 
-  time_t logTime = time(0);
-  tm *ltm = localtime(&logTime);
-  string timeString = to_string(1900 + ltm->tm_year) + "-" + to_string(1 + ltm->tm_mon) + "-" + to_string(ltm->tm_mday) + "-" +
-                      to_string(ltm->tm_hour) + "-" + to_string(ltm->tm_min) + "-" + to_string(ltm->tm_sec);
-
-  metricFile += "_" + timeString + ".txt";
-  trajFile += "_" + timeString + ".txt";
+  ensureParentDirsForFile(metricFile);
+  ensureParentDirsForFile(trajFile);
   metricFilePtr = fopen(metricFile.c_str(), "w");
   trajFilePtr = fopen(trajFile.c_str(), "w");
+  if (metricFilePtr) {
+    bool metrics_write_header = true;
+    nhPrivate.param("metrics_write_header", metrics_write_header, true);
+    if (metrics_write_header) {
+      fprintf(metricFilePtr,
+              "# explored_volume_m3 traveling_distance_m runtime_s time_duration_s "
+              "battery_remaining_percent battery_remaining_distance_m\n");
+      fflush(metricFilePtr);
+    }
+  } else {
+    ROS_ERROR("Could not open metricFile for write: %s", metricFile.c_str());
+  }
+  if (!trajFilePtr) {
+    ROS_ERROR("Could not open trajFile for write: %s", trajFile.c_str());
+  }
 
   ros::Rate rate(100);
   bool status = ros::ok();

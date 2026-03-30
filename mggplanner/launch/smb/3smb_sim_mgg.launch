@@ -12,10 +12,14 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="rviz_en" default="true" />
   <arg name="launch_prefix" default=""/> <!-- gdb -ex run //args -->
-  <arg name="max_battery_distance" default="70.0"/>
+  <arg name="max_battery_distance" default="200.0"/>
   <!-- Multi-robot comm range constraint in mggplanner (rrg): if true, samples/edges respect max distance to peers via TF -->
   <arg name="comm_constraint_enable" default="true"/>
-  <arg name="comm_constraint_max_distance" default="30.0"/>
+  <arg name="comm_constraint_max_distance" default="50.0"/>
+  <!-- Default empty: auto folder visualization_tools/log/<one-timestamp>/ for all robots (R1 sets stamp).
+       Non-empty: force that subfolder name instead of auto. Flat layout: set metrics_use_session_subdir:=false on visualizationTools. -->
+  <arg name="metrics_run_subdir" default=""/>
+  <arg name="metrics_use_session_subdir" default="true"/>
   <param name="use_sim_time" value="$(arg use_sim_time)"/>
 
   <!-- Config files -->
@@ -24,7 +28,7 @@
   <arg name="voxblox_config_file" default="$(find mggplanner)/config/$(arg robot_name)/voxblox_sim_config_sim.yaml"/>
   <arg name="map_config_file" default="$(arg voxblox_config_file)"/>
   <!-- <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/niosh_osrf.world"/> -->
-  <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/darpa_cave_01.world"/>
+  <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/darpa_cave_02.world"/>
   <!-- <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/pittsburgh_mine.world"/> -->
 
  
@@ -57,7 +61,7 @@
 
   <include file="$(find smb_gazebo)/launch/spawn_smb.launch">
     <arg name="joystick" value="false"/>
-    <arg name="x" value="10.0" />
+    <arg name="x" value="0.0" />
     <arg name="y" value="3.0" />
     <arg name="z" value="0.5" />
     <arg name="robot_namespace" value="$(arg robot_id1)" />
@@ -72,7 +76,7 @@
 
   <include file="$(find local_planner)/launch/local_planner_mggplanner.launch" >
     <arg name="cameraOffsetZ" value="0"/>
-    <arg name="goalX" value="10.0"/>
+    <arg name="goalX" value="0.0"/>
     <arg name="goalY" value="3.0"/>
     <arg name="RobotID_TF_prefix" value="$(arg robot_id1)/"/>
   </include>
@@ -148,6 +152,8 @@
     <!-- <remap from="registered_scan" to="mggplanner_node/surface_pointcloud"/> -->
     <remap from="state_estimation" to="$(arg odometry_topic)"/>
     <remap from="gbp_time_log" to="gbp_time_log"/>
+    <param name="metrics_run_subdir" type="string" value="$(arg metrics_run_subdir)"/>
+    <param name="metrics_use_session_subdir" type="bool" value="$(arg metrics_use_session_subdir)"/>
   </node>
 
   <node pkg="visualization_tools" type="realTimePlot.py" name="realTimePlot" output="screen" respawn="true"/>
@@ -164,7 +170,7 @@
     <arg name="joystick" value="false"/>
     <!-- <arg name="x" value="-7.286" /> -->
     <!-- <arg name="y" value="12.731" />    -->
-    <arg name="x" value="-10.0" />
+    <arg name="x" value="0.0" />
     <arg name="y" value="0.0" />
     <arg name="z" value="0.5" />
     <arg name="robot_namespace" value="$(arg robot_id2)" />
@@ -179,7 +185,7 @@
 
   <include file="$(find local_planner)/launch/local_planner_mggplanner.launch" >
     <arg name="cameraOffsetZ" value="0"/>
-    <arg name="goalX" value="-10.0"/>
+    <arg name="goalX" value="0.0"/>
     <arg name="goalY" value="0.0"/>
     <arg name="RobotID_TF_prefix" value="$(arg robot_id2)/"/>
 
@@ -256,6 +262,8 @@
     <!-- <remap from="registered_scan" to="mggplanner_node/surface_pointcloud"/> -->
     <remap from="state_estimation" to="$(arg odometry_topic)"/>
     <remap from="gbp_time_log" to="gbp_time_log"/>
+    <param name="metrics_run_subdir" type="string" value="$(arg metrics_run_subdir)"/>
+    <param name="metrics_use_session_subdir" type="bool" value="$(arg metrics_use_session_subdir)"/>
   </node>
 
   <node pkg="visualization_tools" type="realTimePlot.py" name="realTimePlot" output="screen" respawn="true"/>
@@ -269,8 +277,8 @@
 
   <include file="$(find smb_gazebo)/launch/spawn_smb.launch">
     <arg name="joystick" value="false"/>
-    <arg name="x" value="-20.0" />
-    <arg name="y" value="0.0" />
+    <arg name="x" value="0.0" />
+    <arg name="y" value="-3.0" />
     <arg name="z" value="0.5" />
     <arg name="robot_namespace" value="$(arg robot_id3)" />
     <arg name="robot_id" value="$(arg robot_id3)" />
@@ -284,8 +292,8 @@
 
   <include file="$(find local_planner)/launch/local_planner_mggplanner.launch" >
     <arg name="cameraOffsetZ" value="0"/>
-    <arg name="goalX" value="-20.0"/>
-    <arg name="goalY" value="0.0"/>
+    <arg name="goalX" value="0.0"/>
+    <arg name="goalY" value="-3.0"/>
     <arg name="RobotID_TF_prefix" value="$(arg robot_id3)/"/>
   </include>
  
@@ -362,6 +370,8 @@
     <!-- <remap from="registered_scan" to="mggplanner_node/surface_pointcloud"/> -->
     <remap from="state_estimation" to="$(arg odometry_topic)"/>
     <remap from="gbp_time_log" to="gbp_time_log"/>
+    <param name="metrics_run_subdir" type="string" value="$(arg metrics_run_subdir)"/>
+    <param name="metrics_use_session_subdir" type="bool" value="$(arg metrics_use_session_subdir)"/>
   </node>
 
   <node pkg="visualization_tools" type="realTimePlot.py" name="realTimePlot" output="screen" respawn="true"/>
