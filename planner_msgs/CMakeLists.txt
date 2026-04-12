@@ -57,6 +57,7 @@ add_message_files(
   PoseGraph.msg
   PoseGraphEdge.msg
   PoseGraphValue.msg
+  GcaaBidPacket.msg
 )
 
 add_action_files(
@@ -66,10 +67,11 @@ add_action_files(
 
 generate_messages(
   DEPENDENCIES
+  std_msgs
   geometry_msgs
   actionlib_msgs
 )
 
 catkin_package(
-  CATKIN_DEPENDS message_runtime geometry_msgs actionlib_msgs
+  CATKIN_DEPENDS message_runtime std_msgs geometry_msgs actionlib_msgs
 )

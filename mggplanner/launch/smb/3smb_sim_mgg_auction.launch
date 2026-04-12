@@ -6,9 +6,10 @@
   <arg name="rviz_en" default="true"/>
   <arg name="launch_prefix" default=""/>
   <arg name="max_battery_distance" default="200.0"/>
-  <arg name="comm_constraint_enable" default="true"/>
-  <arg name="comm_constraint_max_distance" default="50.0"/>
-  <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/darpa_cave_02.world"/>
+  <arg name="comm_topology_mode" default="strict"/>
+  <arg name="comm_max_range_m" default="100.0"/>
+  <arg name="comm_relay_battery_fraction" default="0.5"/>
+  <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/pittsburgh_mine.world"/>
   <arg name="metrics_run_subdir" default=""/>
 
   <include file="$(find mggplanner)/launch/smb/3smb_sim_mgg.launch">
@@ -18,11 +19,12 @@
     <arg name="rviz_en" value="$(arg rviz_en)"/>
     <arg name="launch_prefix" value="$(arg launch_prefix)"/>
     <arg name="max_battery_distance" value="$(arg max_battery_distance)"/>
-    <arg name="comm_constraint_enable" value="$(arg comm_constraint_enable)"/>
-    <arg name="comm_constraint_max_distance" value="$(arg comm_constraint_max_distance)"/>
+    <arg name="comm_topology_mode" value="$(arg comm_topology_mode)"/>
+    <arg name="comm_max_range_m" value="$(arg comm_max_range_m)"/>
+    <arg name="comm_relay_battery_fraction" value="$(arg comm_relay_battery_fraction)"/>
     <arg name="world_file" value="$(arg world_file)"/>
     <arg name="metrics_run_subdir" value="$(arg metrics_run_subdir)"/>
     <arg name="mggplanner_config_file"
-         value="$(find mggplanner)/config/$(arg robot_name)/mgg_darpa_auction.yaml"/>
+         value="$(find mggplanner)/config/$(arg robot_name)/mgg_simple_auction.yaml"/>
   </include>
 </launch>

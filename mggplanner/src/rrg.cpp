@@ -1,6 +1,17 @@
 #include "mggplanner/rrg.h"
 
+#include <algorithm>
+#include <ctime>
+
+#include <cerrno>
+#include <cstring>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <sys/stat.h>
+
+#include <ros/package.h>
 #include <opencv2/highgui.hpp>
 #include <opencv2/opencv.hpp>
 #include <pcl/common/transforms.h>
@@ -8,9 +19,41 @@
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
+#include <queue>
+#include <unordered_set>
+
 #define SQ(x) (x * x)
 
 namespace explorer {
+
+namespace {
+bool ensureParentDirsForFile(const std::string& filepath) {
+  for (size_t i = 1; i < filepath.size(); ++i) {
+    if (filepath[i] == '/') {
+      std::string sub = filepath.substr(0, i);
+      if (mkdir(sub.c_str(), 0755) != 0 && errno != EEXIST) {
+        ROS_WARN("[CommunicationConstraint] mkdir %s failed: %s", sub.c_str(),
+                 strerror(errno));
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+std::string makeWallClockStampForFile() {
+  const time_t t = time(nullptr);
+  const tm* ltm = localtime(&t);
+  if (!ltm) {
+    return "unknown_time";
+  }
+  std::ostringstream oss;
+  oss << (1900 + ltm->tm_year) << "-" << (1 + ltm->tm_mon) << "-"
+      << ltm->tm_mday << "-" << ltm->tm_hour << "-" << ltm->tm_min << "-"
+      << ltm->tm_sec;
+  return oss.str();
+}
+}  // namespace
 
 Rrg::Rrg(const ros::NodeHandle& nh, const ros::NodeHandle& nh_private)
     : nh_(nh), nh_private_(nh_private) {
@@ -60,6 +103,8 @@ void Rrg::initializeAttributes() {
   odometry_ready = false;
   last_state_marker_ << 0, 0, 0, 0;
   last_state_marker_global_ << 0, 0, 0, 0;
+  comm_boundary_state_ << 0, 0, 0, 0;
+  comm_return_target_state_ << 0, 0, 0, 0;
   robot_backtracking_prev_ = NULL;
 
   planner_trigger_mode_ = PlannerTriggerModeType::kManual;
@@ -110,7 +155,13 @@ void Rrg::initializeAttributes() {
   battery_remaining_percent_subscriber_ =
       nh_.subscribe("battery_remaining_percent", 10,
                     &Rrg::batteryRemainingPercentCallback, this);
-  
+
+  nh_private_.param<std::string>("gcaa_bids_topic", gcaa_bids_topic_,
+                                 std::string("/gcaa_bids"));
+  gcaa_bid_pub_ =
+      nh_.advertise<planner_msgs::GcaaBidPacket>(gcaa_bids_topic_, 10);
+  gcaa_bid_subscriber_ =
+      nh_.subscribe(gcaa_bids_topic_, 50, &Rrg::gcaaBidCallback, this);
 
   time_log_pub_ =
       nh_.advertise<std_msgs::Float32MultiArray>("gbp_time_log", 10);
@@ -233,11 +284,22 @@ void Rrg::reset() {
   for (int i = 0; i < planning_num_vertices_max_; ++i) {
     edge_inclinations_.push_back(empty_vec);
   }
+  // Do not reset relay / comm-boundary state here: reset() runs every planning
+  // service call; clearing would re-trigger disconnect logging and lose homing.
+  if (comm_return_target_valid_) {
+    visualization_->visualizeCommReturnTarget(comm_return_target_state_, robot_id_,
+                                              true);
+  } else {
+    visualization_->visualizeCommReturnTarget(current_state_, robot_id_, false);
+  }
 }
 
 void Rrg::clear() {}
 
 void Rrg::neighbourGraphCallback(const planner_msgs::Graph& msg){
+  if (planning_params_.independent_planning_enable) {
+    return;
+  }
   if(msg.vertices.size() > 0){
     printf("[%i]Received nei %i graph msg with nodes %i \n",robot_id_, msg.vertices[0].robot_id, msg.vertices.size());
     if(msg.vertices[0].robot_id != robot_id_){
@@ -250,7 +312,16 @@ void Rrg::neighbourGraphCallback(const planner_msgs::Graph& msg){
   }
 }
 
+void Rrg::gcaaBidCallback(const planner_msgs::GcaaBidPacketConstPtr& msg) {
+  if (msg->robot_id == robot_id_) return;
+  std::lock_guard<std::mutex> lock(gcaa_bid_mutex_);
+  gcaa_peer_packets_[msg->robot_id] = *msg;
+}
+
 void Rrg::updateNeighbourGraph(const planner_msgs::Graph& graph_msg){
+  if (planning_params_.independent_planning_enable) {
+    return;
+  }
   if(global_graph_->vertices_map_.size() < 2 ||  graph_msg.vertices.size() < 2){
     return;
   }
@@ -2579,6 +2650,9 @@ void Rrg::expandGlobalGraphFrontierAdditionTimerCallback(
 }
 
 void Rrg::publishGlobalGraphTimerCallback(const ros::TimerEvent& event){
+  if (planning_params_.independent_planning_enable) {
+    return;
+  }
   planner_msgs::Graph global_graph_msg;
   global_graph_->convertThisRobotGraphNodesToMsg(global_graph_msg);
   printf("publishing global graph msg with nodes %i edges %i \n",global_graph_msg.vertices.size(),
@@ -3104,25 +3178,116 @@ bool Rrg::loadParams(bool shared_params) {
   }
 
   if (!planning_params_.loadParams(ns + "/PlanningParams")) return false;
+  if (planning_params_.independent_planning_enable) {
+    ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
+                  "[R%u] Independent planning enabled: neighbour global graph sync is disabled.",
+                  planning_params_.robot_id);
+  }
+  if (planning_params_.gcaa_full_enable) {
+    ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
+                  "[R%u] GCAA-full (distributed bid merge) enabled in auction mode.",
+                  planning_params_.robot_id);
+    if (planning_params_.gcaa_lite_enable) {
+      ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
+                    "[R%u] gcaa_lite_enable is ignored while gcaa_full_enable is true.",
+                    planning_params_.robot_id);
+    }
+  } else if (planning_params_.gcaa_lite_enable) {
+    ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
+                  "[R%u] GCAA-lite enabled in auction mode.",
+                  planning_params_.robot_id);
+  }
   world_frame_ = planning_params_.global_frame_id;
   robot_id_ = planning_params_.robot_id;
   self_base_frame_ = "R" + std::to_string(robot_id_) + "/base_link";
-  nh_private_.param("comm_constraint_enable", comm_constraint_enable_, false);
-  nh_private_.param("comm_constraint_use_2d", comm_constraint_use_2d_, true);
-  nh_private_.param("comm_constraint_max_distance", comm_constraint_max_distance_, 15.0);
-  if (!nh_private_.getParam("comm_constraint_peer_frames",
-                            comm_constraint_peer_frames_)) {
-    comm_constraint_peer_frames_.clear();
-    comm_constraint_peer_frames_.push_back("R1/base_link");
-    comm_constraint_peer_frames_.push_back("R2/base_link");
-    comm_constraint_peer_frames_.push_back("R3/base_link");
+  nh_private_.param("comm_distance_ref_frame", comm_distance_ref_frame_,
+                      std::string("world"));
+  nh_private_.param("comm_disconnect_marker_enable", comm_disconnect_marker_enable_,
+                    true);
+  nh_private_.param("comm_event_log_dir", comm_event_log_dir_, std::string(""));
+  nh_private_.param("comm_event_session_subdir", comm_event_session_subdir_,
+                    std::string(""));
+  if (visualization_ != NULL) {
+    visualization_->setGlobalFrame(world_frame_);
   }
-  ROS_WARN("LOADING ROBOT ID %u",robot_id_);
-  ROS_WARN_COND(
-      comm_constraint_enable_, "[CommunicationConstraint] enabled max=%.2f, "
-      "mode=%s, self=%s, peers=%zu",
-      comm_constraint_max_distance_, comm_constraint_use_2d_ ? "2D" : "3D",
-      self_base_frame_.c_str(), comm_constraint_peer_frames_.size());
+  // Communication modes (PlanningParams/comm_topology_mode):
+  // strict — RRG samples must keep the team pairwise graph connected (globally).
+  // relay — may break connectivity; on first global disconnect, freeze return
+  //         pose and use comm_relay_battery_fraction for reserve-to-return homing.
+  // off — no peer-distance constraint in RRG.
+  if (nh_private_.hasParam("comm_constraint_enable") ||
+      nh_private_.hasParam("comm_constraint_allow_disconnect")) {
+    bool legacy_en = true;
+    bool legacy_allow = false;
+    nh_private_.param("comm_constraint_enable", legacy_en, true);
+    nh_private_.param("comm_constraint_allow_disconnect", legacy_allow,
+                        false);
+    if (!legacy_en) {
+      planning_params_.comm_topology_mode = CommTopologyMode::kOff;
+    } else if (legacy_allow) {
+      planning_params_.comm_topology_mode = CommTopologyMode::kRelay;
+    } else {
+      planning_params_.comm_topology_mode = CommTopologyMode::kStrict;
+    }
+    double legacy_md = 0.0;
+    if (nh_private_.getParam("comm_constraint_max_distance", legacy_md)) {
+      planning_params_.comm_max_range_m = legacy_md;
+    }
+    double legacy_rr = 0.0;
+    if (nh_private_.getParam("comm_boundary_return_trigger_ratio",
+                             legacy_rr)) {
+      planning_params_.comm_relay_battery_fraction =
+          std::max(0.0, std::min(1.0, legacy_rr));
+    }
+  }
+  nh_private_.param("comm_constraint_use_2d", comm_constraint_use_2d_, true);
+  if (!nh_private_.getParam("comm_constraint_peer_frames",
+                              comm_constraint_peer_frames_)) {
+    if (!nh_private_.getParam("comm_peer_frames", comm_constraint_peer_frames_)) {
+      comm_constraint_peer_frames_.clear();
+      comm_constraint_peer_frames_.push_back("R1/base_link");
+      comm_constraint_peer_frames_.push_back("R2/base_link");
+      comm_constraint_peer_frames_.push_back("R3/base_link");
+    }
+  }
+  if (commTopologyEnabled()) {
+    bool has_self = false;
+    for (const auto& f : comm_constraint_peer_frames_) {
+      if (f == self_base_frame_) {
+        has_self = true;
+        break;
+      }
+    }
+    if (!has_self) {
+      ROS_WARN(
+          "[CommunicationConstraint] comm_constraint_peer_frames should include "
+          "%s (all team members) for global connectivity.",
+          self_base_frame_.c_str());
+    }
+  }
+  ROS_WARN("LOADING ROBOT ID %u", robot_id_);
+  {
+    const char* mode_str = "off";
+    const char* rrg_comm_note =
+        "comm disabled — RRG does not filter edges for connectivity";
+    if (planning_params_.comm_topology_mode == CommTopologyMode::kStrict) {
+      mode_str = "strict";
+      rrg_comm_note =
+          "RRG rejects new vertices that would make the team graph disconnected "
+          "(pairwise range <= comm_max_range_m)";
+    } else if (planning_params_.comm_topology_mode == CommTopologyMode::kRelay) {
+      mode_str = "relay";
+      rrg_comm_note =
+          "RRG does NOT filter expansion for comm — disconnection handled only in "
+          "relay state / homing / markers, not in satisfyCommunicationConstraint";
+    }
+    ROS_WARN(
+        "[R%u][CommunicationConstraint] EFFECTIVE comm_topology_mode=%s | %s | "
+        "max_range=%.2fm peers=%zu relay_batt_frac=%.2f",
+        robot_id_, mode_str, rrg_comm_note, planning_params_.comm_max_range_m,
+        comm_constraint_peer_frames_.size(),
+        planning_params_.comm_relay_battery_fraction);
+  }
   // Sloppy way of init pose. TODO: got to do it better.
   if(planning_params_.sim == 0){
     if(planning_params_.robot_id == 1){
@@ -3309,46 +3474,236 @@ bool Rrg::loadParams(bool shared_params) {
   return true;
 }
 
-bool Rrg::satisfyCommunicationConstraint(const StateVec& candidate_state) {
-  if (!comm_constraint_enable_) {
-    return true;
-  }
+bool Rrg::isTeamCommunicationConnected(const StateVec& self_state) {
   if (comm_constraint_peer_frames_.empty()) {
     return true;
   }
-
-  double nearest_peer_distance = std::numeric_limits<double>::infinity();
-  bool found_peer = false;
-  for (const auto& peer_frame : comm_constraint_peer_frames_) {
-    if (peer_frame == self_base_frame_) {
-      continue;
-    }
-    tf::StampedTransform peer_tf;
-    try {
-      listener_->lookupTransform(world_frame_, peer_frame, ros::Time(0), peer_tf);
-    } catch (tf::TransformException& ex) {
-      ROS_WARN_THROTTLE(2.0, "[CommunicationConstraint] TF lookup failed (%s -> %s): %s",
-                        world_frame_.c_str(), peer_frame.c_str(), ex.what());
-      continue;
-    }
-
-    const double dx = candidate_state[0] - peer_tf.getOrigin().x();
-    const double dy = candidate_state[1] - peer_tf.getOrigin().y();
-    double d = std::sqrt(dx * dx + dy * dy);
-    if (!comm_constraint_use_2d_) {
-      const double dz = candidate_state[2] - peer_tf.getOrigin().z();
-      d = std::sqrt(dx * dx + dy * dy + dz * dz);
-    }
-    nearest_peer_distance = std::min(nearest_peer_distance, d);
-    found_peer = true;
-  }
-
-  if (!found_peer) {
-    // Do not block planning when peer TF is temporarily unavailable.
+  const size_t n = comm_constraint_peer_frames_.size();
+  if (n <= 1U) {
     return true;
   }
 
-  return nearest_peer_distance <= comm_constraint_max_distance_;
+  std::vector<Eigen::Vector3d> pos;
+  pos.reserve(n);
+  bool any_peer_tf_failed = false;
+
+  for (const auto& frame : comm_constraint_peer_frames_) {
+    if (frame == self_base_frame_) {
+      double sx = self_state[0];
+      double sy = self_state[1];
+      double sz = self_state[2];
+      try {
+        tf::StampedTransform self_tf;
+        listener_->lookupTransform(comm_distance_ref_frame_, self_base_frame_,
+                                   ros::Time(0), self_tf);
+        sx = self_tf.getOrigin().x();
+        sy = self_tf.getOrigin().y();
+        sz = self_tf.getOrigin().z();
+      } catch (tf::TransformException& ex) {
+        ROS_WARN_THROTTLE(
+            5.0,
+            "[CommunicationConstraint] Self TF failed (%s -> %s): %s — using "
+            "state for connectivity.",
+            comm_distance_ref_frame_.c_str(), self_base_frame_.c_str(),
+            ex.what());
+      }
+      pos.emplace_back(sx, sy, sz);
+      continue;
+    }
+    try {
+      tf::StampedTransform peer_tf;
+      listener_->lookupTransform(comm_distance_ref_frame_, frame, ros::Time(0),
+                                 peer_tf);
+      pos.emplace_back(peer_tf.getOrigin().x(), peer_tf.getOrigin().y(),
+                       peer_tf.getOrigin().z());
+    } catch (tf::TransformException& ex) {
+      ROS_WARN_THROTTLE(
+          2.0, "[CommunicationConstraint] TF lookup failed (%s -> %s): %s",
+          comm_distance_ref_frame_.c_str(), frame.c_str(), ex.what());
+      any_peer_tf_failed = true;
+    }
+  }
+
+  if (any_peer_tf_failed || pos.size() != n) {
+    // Incomplete graph: do not treat as disconnected (same as legacy nearest-peer path).
+    return true;
+  }
+
+  const double range = planning_params_.comm_max_range_m;
+  std::vector<std::vector<int>> adj(n);
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = i + 1; j < n; ++j) {
+      const double dx = pos[i].x() - pos[j].x();
+      const double dy = pos[i].y() - pos[j].y();
+      double dist = std::sqrt(dx * dx + dy * dy);
+      if (!comm_constraint_use_2d_) {
+        const double dz = pos[i].z() - pos[j].z();
+        dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+      }
+      if (dist <= range) {
+        adj[i].push_back(static_cast<int>(j));
+        adj[j].push_back(static_cast<int>(i));
+      }
+    }
+  }
+
+  std::vector<bool> vis(n, false);
+  std::queue<int> q;
+  q.push(0);
+  vis[0] = true;
+  int reached = 0;
+  while (!q.empty()) {
+    const int u = q.front();
+    q.pop();
+    ++reached;
+    for (int v : adj[u]) {
+      if (!vis[static_cast<size_t>(v)]) {
+        vis[static_cast<size_t>(v)] = true;
+        q.push(v);
+      }
+    }
+  }
+  return reached == static_cast<int>(n);
+}
+
+bool Rrg::satisfyCommunicationConstraint(const StateVec& candidate_state) {
+  if (!commTopologyEnabled()) {
+    return true;
+  }
+  if (commRelayTopology()) {
+    return true;
+  }
+
+  return isTeamCommunicationConnected(candidate_state);
+}
+
+void Rrg::fillCommReturnWaypoint(geometry_msgs::Pose& pose) {
+  if (comm_return_target_valid_) {
+    convertStateToPoseMsg(comm_return_target_state_, pose);
+  } else {
+    convertStateToPoseMsg(comm_boundary_state_, pose);
+  }
+}
+
+void Rrg::publishCommReturnTargetMarker() {
+  if (visualization_ == NULL) return;
+  if (comm_return_target_valid_) {
+    visualization_->visualizeCommReturnTarget(comm_return_target_state_, robot_id_,
+                                              true);
+  } else {
+    visualization_->visualizeCommReturnTarget(current_state_, robot_id_, false);
+  }
+}
+
+std::string Rrg::commEventLogSessionDirectory() const {
+  std::string dir = comm_event_log_dir_;
+  if (dir.empty()) {
+    try {
+      const std::string pkg = ros::package::getPath("visualization_tools");
+      if (pkg.empty()) {
+        return "";
+      }
+      dir = pkg + "/log";
+    } catch (const std::exception& e) {
+      ROS_WARN("[CommunicationConstraint] ros::package::getPath: %s",
+               e.what());
+      return "";
+    }
+  }
+  std::string session = comm_event_session_subdir_;
+  if (session.empty()) {
+    ros::param::get("/mgg_metrics_session_stamp", session);
+  }
+  if (!session.empty()) {
+    dir += "/" + session;
+  } else {
+    dir += "/_no_session_stamp";
+  }
+  return dir;
+}
+
+void Rrg::writeHomingFailureEvent(const std::string& event_name,
+                                  const std::string& detail) {
+  const std::string dir = commEventLogSessionDirectory();
+  if (dir.empty()) {
+    ROS_ERROR(
+        "[HomingFailure] %s (could not resolve log dir; set comm_event_log_dir "
+        "or visualization_tools package). Detail: %s",
+        event_name.c_str(), detail.c_str());
+    return;
+  }
+  const std::string stamp = makeWallClockStampForFile();
+  std::ostringstream path;
+  path << dir << "/homing_failure_R" << robot_id_ << "_" << stamp << ".txt";
+  const std::string fpath = path.str();
+  if (!ensureParentDirsForFile(fpath)) {
+    ROS_ERROR("[HomingFailure] %s mkdir failed. Detail: %s", event_name.c_str(),
+              detail.c_str());
+    return;
+  }
+  std::ofstream out(fpath.c_str());
+  if (!out) {
+    ROS_ERROR("[HomingFailure] %s could not write %s. Detail: %s",
+              event_name.c_str(), fpath.c_str(), detail.c_str());
+    return;
+  }
+  out << "event=" << event_name << "\n";
+  out << "robot_id=" << robot_id_ << "\n";
+  out << "wall_clock=" << stamp << "\n";
+  out << "ros_time_sec=" << std::fixed << std::setprecision(6)
+      << ros::Time::now().toSec() << "\n";
+  out << "detail=" << detail << "\n";
+  out.close();
+  ROS_ERROR("[HomingFailure] %s — logged to %s", event_name.c_str(),
+            fpath.c_str());
+}
+
+void Rrg::writeCommDisconnectMarkerFile() {
+  if (!comm_disconnect_marker_enable_) {
+    return;
+  }
+  if (comm_disconnect_marker_file_written_) {
+    return;
+  }
+  const std::string dir = commEventLogSessionDirectory();
+  if (dir.empty()) {
+    ROS_WARN(
+        "[CommunicationConstraint] visualization_tools package path empty; "
+        "set comm_event_log_dir.");
+    return;
+  }
+  const std::string stamp = makeWallClockStampForFile();
+  std::ostringstream path;
+  path << dir << "/comm_disconnect_R" << robot_id_ << "_" << stamp
+       << ".marker.txt";
+  const std::string fpath = path.str();
+  if (!ensureParentDirsForFile(fpath)) {
+    return;
+  }
+  std::ofstream out(fpath.c_str());
+  if (!out) {
+    ROS_WARN("[CommunicationConstraint] Could not write marker file %s",
+             fpath.c_str());
+    return;
+  }
+  out << "event=team_communication_disconnected\n";
+  out << "robot_id=" << robot_id_ << "\n";
+  out << "wall_clock=" << stamp << "\n";
+  out << "ros_time_sec=" << std::fixed << std::setprecision(6)
+      << ros::Time::now().toSec() << "\n";
+  out << "return_pose_x=" << comm_return_target_state_[0] << "\n";
+  out << "return_pose_y=" << comm_return_target_state_[1] << "\n";
+  out << "return_pose_z=" << comm_return_target_state_[2] << "\n";
+  out << "return_pose_yaw=" << comm_return_target_state_[3] << "\n";
+  out << "boundary_battery_percent=" << comm_boundary_battery_percent_ << "\n";
+  out << "relay_return_threshold_percent="
+      << comm_boundary_return_threshold_percent_ << "\n";
+  out << "comm_max_range_m=" << planning_params_.comm_max_range_m << "\n";
+  out << "log_dir=" << dir << "\n";
+  out.close();
+  comm_disconnect_marker_file_written_ = true;
+  ROS_WARN("[CommunicationConstraint] Disconnect marker file: %s",
+           fpath.c_str());
 }
 
 void Rrg::setGeofenceManager(
@@ -4308,7 +4663,26 @@ std::vector<geometry_msgs::Pose> Rrg::getGlobalPath(
 
 std::vector<geometry_msgs::Pose> Rrg::getHomingPath(std::string tgt_frame) {
   std::vector<geometry_msgs::Pose> ret_path;
-  ret_path = searchHomingPath(tgt_frame, current_state_);
+  const bool comm_skip_auto_homing =
+      commRelayTopology() && !comm_ever_disconnected_;
+  if (comm_skip_auto_homing) {
+    ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
+                  "[CommunicationConstraint] always connected: homing skipped.");
+    return ret_path;
+  }
+  const bool use_comm_boundary_as_target =
+      commRelayTopology() && comm_boundary_state_valid_ &&
+      comm_ever_disconnected_;
+  if (use_comm_boundary_as_target) {
+    geometry_msgs::PoseStamped boundary_waypoint;
+    boundary_waypoint.header.stamp = ros::Time::now();
+    boundary_waypoint.header.frame_id = world_frame_;
+    fillCommReturnWaypoint(boundary_waypoint.pose);
+    ret_path = getGlobalPath(boundary_waypoint);
+  }
+  if (ret_path.size() < 1) {
+    ret_path = searchHomingPath(tgt_frame, current_state_);
+  }
   if (ret_path.size() < 1) return ret_path;
 
   // Re-assign yaw in beginning (HNI)
@@ -4527,61 +4901,82 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
       ROS_WARN_COND(global_verbosity >= Verbosity::PLANNER_STATUS, "RAN OUT OF BATTERY --> STOP HERE.");
       return homing_path;
     }
-    if (planning_params_.battery_percent_homing_enable &&
+    // Relay mode: if we never left comm range, skip auto homing.
+    const bool comm_skip_auto_homing =
+        commRelayTopology() && !comm_ever_disconnected_;
+    double battery_homing_threshold =
+        planning_params_.battery_percent_homing_threshold;
+    const bool use_comm_boundary_as_target =
+        commRelayTopology() && comm_boundary_state_valid_ &&
+        comm_ever_disconnected_;
+    // Battery threshold: only switch to "half of boundary battery" while
+    // currently out of range (after first disconnect).
+    const bool use_comm_boundary_battery_threshold =
+        use_comm_boundary_as_target && comm_is_out_of_range_;
+    if (use_comm_boundary_battery_threshold) {
+      battery_homing_threshold = comm_boundary_return_threshold_percent_;
+    }
+    // Not == : trigger when remaining charge is at or below critical (<=).
+    // Epsilon avoids missing the window due to float noise or coarse battery
+    // topic steps (e.g. only integer percent published).
+    constexpr double kBatteryCriticalEps = 0.05;
+    const bool battery_at_or_below_critical =
+        planning_params_.battery_percent_homing_enable &&
         battery_remaining_percent_ <=
-            planning_params_.battery_percent_homing_threshold) {
+            battery_homing_threshold + kBatteryCriticalEps;
+    if (comm_skip_auto_homing && battery_at_or_below_critical) {
+      ROS_WARN_THROTTLE(
+          5.0,
+          "[Homing] R%u: battery %.2f%% at/below critical %.2f%% (eps=%.2f) — "
+          "auto homing skipped (relay + team never disconnected).",
+          robot_id_, battery_remaining_percent_, battery_homing_threshold,
+          kBatteryCriticalEps);
+    }
+    if (!comm_skip_auto_homing && battery_at_or_below_critical) {
       ROS_WARN_COND(
           global_verbosity >= Verbosity::PLANNER_STATUS,
-          "BATTERY THRESHOLD REACHED: %.1f%% <= %.1f%% --> HOMING ENGAGED.",
+          "BATTERY CRITICAL: %.2f%% at/below threshold %.2f%% (eps=%.2f) --> %s.",
           battery_remaining_percent_,
-          planning_params_.battery_percent_homing_threshold);
-      Vertex* root_vertex = local_graph_->getVertex(0);
-      homing_path = searchHomingPath(tgt_frame, root_vertex->state);
+          battery_homing_threshold,
+          kBatteryCriticalEps,
+          use_comm_boundary_as_target ? "COMM-BOUNDARY HOMING" : "HOMING");
+      if (use_comm_boundary_as_target) {
+        geometry_msgs::PoseStamped boundary_waypoint;
+        boundary_waypoint.header.stamp = ros::Time::now();
+        boundary_waypoint.header.frame_id = world_frame_;
+        fillCommReturnWaypoint(boundary_waypoint.pose);
+        homing_path = getGlobalPath(boundary_waypoint);
+      } else {
+        Vertex* root_vertex = local_graph_->getVertex(0);
+        homing_path = searchHomingPath(tgt_frame, root_vertex->state);
+      }
       if (homing_path.empty()) {
-        ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
-                      "Can not find threshold-triggered homing path.");
+        std::ostringstream detail;
+        detail << "battery_threshold_trigger path_empty "
+               << "mode="
+               << (use_comm_boundary_as_target ? "comm_boundary_getGlobalPath"
+                                                 : "searchHomingPath_root")
+               << " battery_remaining_percent=" << battery_remaining_percent_
+               << " threshold_used=" << battery_homing_threshold
+               << " yaml_battery_percent_homing_threshold="
+               << planning_params_.battery_percent_homing_threshold
+               << " use_comm_boundary_battery_threshold="
+               << (use_comm_boundary_battery_threshold ? "true" : "false")
+               << " global_graph_vertices=" << global_graph_->getNumVertices();
+        writeHomingFailureEvent("battery_threshold_homing_failed", detail.str());
+        ROS_ERROR(
+            "[Homing] R%u: battery %.2f%% at/below %.2f%% but "
+            "threshold-triggered homing path is empty.",
+            robot_id_, battery_remaining_percent_, battery_homing_threshold);
         return homing_path;
       }
-      if (planning_params_.path_safety_enhance_enable) {
+      if (!use_comm_boundary_as_target && planning_params_.path_safety_enhance_enable) {
         std::vector<geometry_msgs::Pose> mod_path;
         if (improveFreePath(homing_path, mod_path, true)) {
           homing_path = mod_path;
         }
       }
-      const double kInterpolationDistance =
-          planning_params_.path_interpolation_distance;
-      std::vector<geometry_msgs::Pose> interp_path;
-      if (Trajectory::interpolatePath(homing_path, kInterpolationDistance,
-                                      interp_path)) {
-        homing_path = interp_path;
-      }
-      visualization_->visualizeRefPath(homing_path);
-      homing_engaged_ = true;
-      return homing_path;
-    }
-    // Check two conditions whatever which one comes first.
-    double time_remaining =
-        std::min(time_budget_remaining, current_battery_time_remaining_);
-    // homing_path = getHomingPath(tgt_frame);
-    // Start searching from current root vertex of spanning local graph.
-    Vertex* root_vertex = local_graph_->getVertex(0);
-    homing_path = searchHomingPath(tgt_frame, root_vertex->state);
-    if (!homing_path.empty()) {
-      double homing_len = Trajectory::getPathLength(homing_path);
-      double time_to_home = homing_len / planning_params_.v_homing_max;
-      ROS_INFO_COND(global_verbosity >= Verbosity::INFO, "Time to home: %f; Time remaining: %f", time_to_home,
-               time_remaining);
-
-      const double kTimeDelta = 20;
-      if (time_to_home > time_remaining - kTimeDelta) {
-        ROS_WARN_COND(global_verbosity >= Verbosity::PLANNER_STATUS, "REACHED TIME LIMIT: HOMING ENGAGED.");
-        if (planning_params_.path_safety_enhance_enable) {
-          std::vector<geometry_msgs::Pose> mod_path;
-          if (improveFreePath(homing_path, mod_path, true)) {
-            homing_path = mod_path;
-          }
-        }
-
+      if (!use_comm_boundary_as_target) {
         const double kInterpolationDistance =
             planning_params_.path_interpolation_distance;
         std::vector<geometry_msgs::Pose> interp_path;
@@ -4589,14 +4984,71 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
                                         interp_path)) {
           homing_path = interp_path;
         }
-
-        visualization_->visualizeRefPath(homing_path);
-        homing_engaged_ = true;
-        return homing_path;
       }
+      visualization_->visualizeRefPath(homing_path);
+      homing_engaged_ = true;
+      return homing_path;
+    }
+    if (!comm_skip_auto_homing) {
+      // Check two conditions whatever which one comes first.
+      double time_remaining =
+          std::min(time_budget_remaining, current_battery_time_remaining_);
+      if (use_comm_boundary_as_target) {
+        geometry_msgs::PoseStamped boundary_waypoint;
+        boundary_waypoint.header.stamp = ros::Time::now();
+        boundary_waypoint.header.frame_id = world_frame_;
+      fillCommReturnWaypoint(boundary_waypoint.pose);
+      homing_path = getGlobalPath(boundary_waypoint);
     } else {
-      // @TODO Issue with global graph, cannot find a homing path.
-      ROS_WARN_COND(global_verbosity >= Verbosity::WARN, "Can not find a path to return home from here.");
+      // Start searching from current root vertex of spanning local graph.
+      Vertex* root_vertex = local_graph_->getVertex(0);
+      homing_path = searchHomingPath(tgt_frame, root_vertex->state);
+    }
+    if (!homing_path.empty()) {
+      double homing_len = Trajectory::getPathLength(homing_path);
+      double time_to_home = homing_len / planning_params_.v_homing_max;
+      ROS_INFO_COND(global_verbosity >= Verbosity::INFO, "Time to home: %f; Time remaining: %f", time_to_home,
+               time_remaining);
+
+        const double kTimeDelta = 20;
+        if (time_to_home > time_remaining - kTimeDelta) {
+          ROS_WARN_COND(global_verbosity >= Verbosity::PLANNER_STATUS, "REACHED TIME LIMIT: HOMING ENGAGED.");
+          if (!use_comm_boundary_as_target &&
+              planning_params_.path_safety_enhance_enable) {
+            std::vector<geometry_msgs::Pose> mod_path;
+            if (improveFreePath(homing_path, mod_path, true)) {
+              homing_path = mod_path;
+            }
+          }
+
+          if (!use_comm_boundary_as_target) {
+            const double kInterpolationDistance =
+                planning_params_.path_interpolation_distance;
+            std::vector<geometry_msgs::Pose> interp_path;
+            if (Trajectory::interpolatePath(homing_path, kInterpolationDistance,
+                                            interp_path)) {
+              homing_path = interp_path;
+            }
+          }
+
+          visualization_->visualizeRefPath(homing_path);
+          homing_engaged_ = true;
+          return homing_path;
+        }
+      } else {
+        std::ostringstream detail;
+        detail << "proactive_time_budget_homing path_empty "
+               << "mode="
+               << (use_comm_boundary_as_target ? "comm_boundary_getGlobalPath"
+                                                 : "searchHomingPath_root")
+               << " time_remaining=" << time_remaining
+               << " global_graph_vertices=" << global_graph_->getNumVertices();
+        writeHomingFailureEvent("proactive_homing_no_path", detail.str());
+        ROS_ERROR(
+            "[Homing] R%u: cannot find a path to return home from here "
+            "(proactive time/budget check).",
+            robot_id_);
+      }
     }
   }
 
@@ -5277,6 +5729,58 @@ void Rrg::setState(StateVec& state) {
   }
   current_state_ = state;
   odometry_ready = true;
+  if (commRelayTopology()) {
+    // Freeze return pose when the *team* stops being globally connected (pairwise
+    // graph within comm_max_range_m is disconnected), e.g. R3 isolated but R1–R2
+    // still close — both R1 and R2 trigger on the same transition.
+    const bool team_connected = isTeamCommunicationConnected(current_state_);
+    if (team_connected) {
+      comm_is_out_of_range_ = false;
+      // Full team connected again: clear latch so the next disconnect can record
+      // a fresh return pose. Until then, comm_relay_disconnect_latched_ keeps
+      // the first recorded critical point fixed (no refresh on flicker/disconnect).
+      if (comm_relay_disconnect_latched_) {
+        comm_relay_disconnect_latched_ = false;
+        comm_ever_disconnected_ = false;
+        comm_return_target_valid_ = false;
+        comm_disconnect_marker_file_written_ = false;
+        ROS_INFO_COND(
+            global_verbosity >= Verbosity::INFO,
+            "[CommunicationConstraint] R%u: team globally connected — reset relay "
+            "disconnect latch; boundary will track again until next disconnect.",
+            robot_id_);
+      }
+      comm_boundary_state_ = current_state_;
+      comm_boundary_state_valid_ = true;
+      comm_boundary_battery_percent_ = battery_remaining_percent_;
+      comm_boundary_return_threshold_percent_ =
+          std::max(0.0,
+                   std::min(100.0, comm_boundary_battery_percent_ *
+                                       planning_params_.comm_relay_battery_fraction));
+    } else {
+      comm_ever_disconnected_ = true;
+      if (!comm_relay_disconnect_latched_) {
+        comm_return_target_state_ = comm_boundary_state_;
+        comm_return_target_valid_ = true;
+        comm_relay_disconnect_latched_ = true;
+        comm_is_out_of_range_ = true;
+        ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
+                      "[CommunicationConstraint] R%u: team not globally connected — "
+                      "return target = last pose while team was connected (%.2f, %.2f).",
+                      robot_id_, comm_return_target_state_[0],
+                      comm_return_target_state_[1]);
+        ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
+                      "[CommunicationConstraint] boundary battery=%.1f%%, "
+                      "relay return threshold=%.1f%%",
+                      comm_boundary_battery_percent_,
+                      comm_boundary_return_threshold_percent_);
+        writeCommDisconnectMarkerFile();
+      } else {
+        comm_is_out_of_range_ = true;
+      }
+    }
+    publishCommReturnTargetMarker();
+  }
   // Clear free space based on current voxel size.
   if (planner_trigger_count_ < planning_params_.augment_free_voxels_time) {
     map_manager_->augmentFreeBox(
@@ -5786,9 +6290,29 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
     ROS_INFO_COND(global_verbosity >= Verbosity::INFO, "No frontier exists");
     // Keep exploring or go home if no more frontiers
     if (planning_params_.go_home_if_fully_explored) {
-      ROS_WARN_COND(global_verbosity >= Verbosity::WARN, " --> Calling HOMING instead.");
-      ret_path = getHomingPath(world_frame_);
-      homing_engaged_ = true;
+      const bool comm_skip_auto_homing =
+          commRelayTopology() && !comm_ever_disconnected_;
+      if (comm_skip_auto_homing) {
+        ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
+                      "[CommunicationConstraint] always connected: skip "
+                      "go_home_if_fully_explored homing.");
+        num_low_gain_iters_ = 0;
+      } else {
+        ROS_WARN_COND(global_verbosity >= Verbosity::WARN, " --> Calling HOMING instead.");
+        const bool use_comm_boundary_as_target =
+            commRelayTopology() && comm_boundary_state_valid_ &&
+            comm_ever_disconnected_;
+        if (use_comm_boundary_as_target) {
+          geometry_msgs::PoseStamped boundary_waypoint;
+          boundary_waypoint.header.stamp = ros::Time::now();
+          boundary_waypoint.header.frame_id = world_frame_;
+          fillCommReturnWaypoint(boundary_waypoint.pose);
+          ret_path = getGlobalPath(boundary_waypoint);
+        } else {
+          ret_path = getHomingPath(world_frame_);
+        }
+        homing_engaged_ = true;
+      }
     } else {
       num_low_gain_iters_ = 0;
     }
@@ -5950,8 +6474,13 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
     const double kGDistancePenalty = 0.05;      // Original : 0.01
     const double kGOtherRobotPenalty = 0.001;   // preferred 0.001
     const bool auction_enabled =
+        !planning_params_.independent_planning_enable &&
         planning_params_.auction_frontier_enable &&
         !planning_params_.baseline_greedy_nearest_frontier_enable;
+    const bool gcaa_full_enabled =
+        auction_enabled && planning_params_.gcaa_full_enable;
+    const bool gcaa_lite_enabled =
+        auction_enabled && planning_params_.gcaa_lite_enable && !gcaa_full_enabled;
 
     auto parse_robot_id_from_frame = [](const std::string& frame) {
       size_t pos = frame.find('R');
@@ -5983,6 +6512,10 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
         }
       }
     }
+
+    const bool run_multi_round_gcaa =
+        gcaa_full_enabled ||
+        (gcaa_lite_enabled && !robot_positions.empty());
 
     auto evaluate_frontier_score = [&](Vertex* f, double* score_out,
                                        double* dist_out,
@@ -6033,25 +6566,29 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
     };
 
     std::unordered_map<int, int> frontier_winner_map;
+    auto compute_auction_bid = [&](const Eigen::Vector3d& robot_pos,
+                                   Vertex* f) {
+      const Eigen::Vector3d rel = f->state.head(3) - robot_pos;
+      const double dist = rel.norm();
+      const double eps = 1e-3;
+      const double horiz = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + eps);
+      const double inc = std::atan2(std::abs(rel[2]), horiz);
+      double max_incl = planning_params_.max_inclination;
+      if (max_incl < eps) max_incl = eps;
+      double risk = inc / max_incl;
+      if (risk > 1.0) risk = 1.0;
+      return f->vol_gain.gain -
+             planning_params_.auction_frontier_alpha * dist -
+             planning_params_.auction_frontier_beta * risk;
+    };
+
     auto pass_auction_winner_filter = [&](Vertex* f) {
       if (!auction_enabled || robot_positions.empty()) return true;
-      const Eigen::Vector3d frontier_pos = f->state.head(3);
-      const double eps = 1e-3;
       int winner_robot_id = -1;
       double winner_bid = -std::numeric_limits<double>::infinity();
       for (const auto& kv : robot_positions) {
         const int rid = kv.first;
-        const Eigen::Vector3d rel = frontier_pos - kv.second;
-        const double dist = rel.norm();
-        const double horiz = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + eps);
-        const double inc = std::atan2(std::abs(rel[2]), horiz);
-        double max_incl = planning_params_.max_inclination;
-        if (max_incl < eps) max_incl = eps;
-        double risk = inc / max_incl;
-        if (risk > 1.0) risk = 1.0;
-        const double bid = f->vol_gain.gain -
-                           planning_params_.auction_frontier_alpha * dist -
-                           planning_params_.auction_frontier_beta * risk;
+        const double bid = compute_auction_bid(kv.second, f);
         if (bid > winner_bid ||
             (std::abs(bid - winner_bid) < 1e-6 &&
              (winner_robot_id < 0 || rid < winner_robot_id))) {
@@ -6066,26 +6603,206 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
       return winner_robot_id == (int)robot_id_;
     };
 
-    for (int i = 0; i < feasible_global_frontiers.size(); ++i) {
-      Vertex* f = feasible_global_frontiers[i];
-      if (!pass_auction_winner_filter(f)) {
-        continue;
+    if (run_multi_round_gcaa) {
+      std::unordered_map<int, std::unordered_map<int, double>> bid_table;
+      const std::unordered_map<int, std::unordered_map<int, double>>*
+          bid_table_ptr = nullptr;
+      if (gcaa_full_enabled) {
+        for (auto* f : feasible_global_frontiers) {
+          bid_table[(int)robot_id_][f->id] = compute_auction_bid(
+              robot_positions[(int)robot_id_], f);
+        }
+        planner_msgs::GcaaBidPacket pkt;
+        pkt.header.stamp = ros::Time::now();
+        pkt.header.frame_id = world_frame_;
+        pkt.robot_id = robot_id_;
+        for (auto* f : feasible_global_frontiers) {
+          pkt.frontier_ids.push_back(f->id);
+          pkt.bids.push_back(bid_table[(int)robot_id_][f->id]);
+        }
+        gcaa_bid_pub_.publish(pkt);
+        const double wait_sec = planning_params_.gcaa_bid_wait_sec;
+        ros::Time t0 = ros::Time::now();
+        while ((ros::Time::now() - t0).toSec() < wait_sec) {
+          ros::spinOnce();
+          ros::Duration(0.002).sleep();
+        }
+        {
+          std::lock_guard<std::mutex> lock(gcaa_bid_mutex_);
+          for (auto it = gcaa_peer_packets_.begin();
+               it != gcaa_peer_packets_.end();) {
+            if ((ros::Time::now() - it->second.header.stamp).toSec() >
+                planning_params_.gcaa_bid_timeout_sec) {
+              it = gcaa_peer_packets_.erase(it);
+            } else {
+              ++it;
+            }
+          }
+          for (const auto& kv : gcaa_peer_packets_) {
+            const auto& p = kv.second;
+            if (p.robot_id == robot_id_) continue;
+            for (size_t i = 0; i < p.frontier_ids.size() && i < p.bids.size();
+                 ++i) {
+              bid_table[p.robot_id][p.frontier_ids[i]] = p.bids[i];
+            }
+          }
+        }
+        bid_table_ptr = &bid_table;
       }
 
-      double exp_gain = 0.0;
-      double current_to_frontier_distance = 0.0;
-      std::vector<int> current_to_frontier_path_id;
-      evaluate_frontier_score(f, &exp_gain, &current_to_frontier_distance,
-                              &current_to_frontier_path_id);
+      auto get_bid = [&](int rid, Vertex* v) -> double {
+        if (gcaa_full_enabled && bid_table_ptr) {
+          auto r_it = bid_table_ptr->find(rid);
+          if (r_it != bid_table_ptr->end()) {
+            auto b_it = r_it->second.find(v->id);
+            if (b_it != r_it->second.end()) return b_it->second;
+          }
+          auto pos_it = robot_positions.find(rid);
+          if (pos_it != robot_positions.end()) {
+            return compute_auction_bid(pos_it->second, v);
+          }
+          return -std::numeric_limits<double>::infinity();
+        }
+        auto pos_it = robot_positions.find(rid);
+        if (pos_it == robot_positions.end()) {
+          return -std::numeric_limits<double>::infinity();
+        }
+        return compute_auction_bid(pos_it->second, v);
+      };
 
-      frontier_exp_gain[f->id] = exp_gain;
-      if (exp_gain > best_gain) {
-        best_gain = exp_gain;
-        best_frontier = f;
+      std::vector<int> remaining_frontier_ids;
+      remaining_frontier_ids.reserve(feasible_global_frontiers.size());
+      std::unordered_map<int, Vertex*> frontier_by_id;
+      for (auto* f : feasible_global_frontiers) {
+        remaining_frontier_ids.push_back(f->id);
+        frontier_by_id[f->id] = f;
       }
-      ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
-                    "[R%u] frontier=%d gain=%.3f dist=%.3f",
-                    robot_id_, f->id, exp_gain, current_to_frontier_distance);
+
+      std::vector<int> active_robot_ids;
+      if (gcaa_full_enabled) {
+        std::unordered_set<int> id_set;
+        for (const auto& kv : robot_positions) id_set.insert(kv.first);
+        for (const auto& kv : bid_table) id_set.insert(kv.first);
+        active_robot_ids.assign(id_set.begin(), id_set.end());
+        std::sort(active_robot_ids.begin(), active_robot_ids.end());
+      } else {
+        active_robot_ids.reserve(robot_positions.size());
+        for (const auto& kv : robot_positions) {
+          active_robot_ids.push_back(kv.first);
+        }
+      }
+      const int max_rounds = std::max(1, (int)active_robot_ids.size());
+      std::unordered_map<int, int> robot_assignment;
+
+      for (int round = 0; round < max_rounds; ++round) {
+        if (active_robot_ids.empty() || remaining_frontier_ids.empty()) break;
+
+        std::unordered_map<int, std::pair<int, double>> best_for_frontier;
+        for (const int rid : active_robot_ids) {
+          if (!gcaa_full_enabled) {
+            auto pos_it = robot_positions.find(rid);
+            if (pos_it == robot_positions.end()) continue;
+          }
+
+          int best_fid = -1;
+          double best_bid = -std::numeric_limits<double>::infinity();
+          for (const int fid : remaining_frontier_ids) {
+            auto fit = frontier_by_id.find(fid);
+            if (fit == frontier_by_id.end() || fit->second == NULL) continue;
+            const double bid = get_bid(rid, fit->second);
+            if (bid > best_bid) {
+              best_bid = bid;
+              best_fid = fid;
+            }
+          }
+          if (best_fid < 0) continue;
+          auto fw_it = best_for_frontier.find(best_fid);
+          if (fw_it == best_for_frontier.end() ||
+              best_bid > fw_it->second.second ||
+              (std::abs(best_bid - fw_it->second.second) < 1e-6 &&
+               rid < fw_it->second.first)) {
+            best_for_frontier[best_fid] = std::make_pair(rid, best_bid);
+          }
+        }
+
+        if (best_for_frontier.empty()) break;
+
+        std::vector<int> next_active;
+        next_active.reserve(active_robot_ids.size());
+        std::unordered_map<int, bool> robot_won;
+        std::unordered_map<int, bool> frontier_taken;
+        for (const auto& kv : best_for_frontier) {
+          const int fid = kv.first;
+          const int rid = kv.second.first;
+          const double bid = kv.second.second;
+          robot_assignment[rid] = fid;
+          frontier_winner_map[fid] = rid;
+          frontier_exp_gain[fid] = bid;
+          robot_won[rid] = true;
+          frontier_taken[fid] = true;
+        }
+
+        std::vector<int> tmp_frontiers;
+        tmp_frontiers.reserve(remaining_frontier_ids.size());
+        for (const int fid : remaining_frontier_ids) {
+          if (frontier_taken.find(fid) == frontier_taken.end()) {
+            tmp_frontiers.push_back(fid);
+          }
+        }
+        remaining_frontier_ids.swap(tmp_frontiers);
+
+        for (const int rid : active_robot_ids) {
+          if (robot_won.find(rid) == robot_won.end()) {
+            next_active.push_back(rid);
+          }
+        }
+        active_robot_ids.swap(next_active);
+      }
+
+      auto self_it = robot_assignment.find((int)robot_id_);
+      if (self_it != robot_assignment.end()) {
+        const int assigned_fid = self_it->second;
+        auto fit = frontier_by_id.find(assigned_fid);
+        if (fit != frontier_by_id.end()) {
+          Vertex* f = fit->second;
+          double exp_gain = 0.0;
+          double current_to_frontier_distance = 0.0;
+          std::vector<int> current_to_frontier_path_id;
+          evaluate_frontier_score(f, &exp_gain, &current_to_frontier_distance,
+                                  &current_to_frontier_path_id);
+          frontier_exp_gain[f->id] = exp_gain;
+          if (exp_gain > best_gain) {
+            best_gain = exp_gain;
+            best_frontier = f;
+          }
+          ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
+                        "[%s][R%u] assigned frontier=%d gain=%.3f dist=%.3f",
+                        gcaa_full_enabled ? "GCAA-full" : "GCAA-lite",
+                        robot_id_, f->id, exp_gain, current_to_frontier_distance);
+        }
+      }
+    } else {
+      for (int i = 0; i < feasible_global_frontiers.size(); ++i) {
+        Vertex* f = feasible_global_frontiers[i];
+        if (!pass_auction_winner_filter(f)) {
+          continue;
+        }
+
+        double exp_gain = 0.0;
+        double current_to_frontier_distance = 0.0;
+        std::vector<int> current_to_frontier_path_id;
+        evaluate_frontier_score(f, &exp_gain, &current_to_frontier_distance,
+                                &current_to_frontier_path_id);
+
+        frontier_exp_gain[f->id] = exp_gain;
+        if (exp_gain > best_gain) {
+          best_gain = exp_gain;
+          best_frontier = f;
+        }
+        ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
+                      "[R%u] frontier=%d gain=%.3f dist=%.3f",
+                      robot_id_, f->id, exp_gain, current_to_frontier_distance);
+      }
     }
 
     if (frontier_exp_gain.empty() && auction_enabled &&

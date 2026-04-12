@@ -1,5 +1,6 @@
 #include "mggplanner/mggplanner_rviz.h"
 
+#include <sstream>
 #include <tf/transform_datatypes.h>
 
 namespace explorer {
@@ -62,7 +63,93 @@ Visualization::Visualization(const ros::NodeHandle& nh,
   pcl_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("vis/occupied_pcl", 10);
   path_pub_ =
       nh_.advertise<visualization_msgs::MarkerArray>("vis/alternate_path", 10);
+  comm_return_target_pub_ = nh_.advertise<visualization_msgs::MarkerArray>(
+      "vis/comm_return_target", 10);
   best_path_id_ = 0;
+}
+
+void Visualization::visualizeCommReturnTarget(const StateVec& state,
+                                              uint32_t robot_id,
+                                              bool visible) {
+  visualization_msgs::MarkerArray ma;
+  const char* ns = "comm_return_target";
+  if (!visible) {
+    for (int id = 0; id <= 2; ++id) {
+      visualization_msgs::Marker del;
+      del.header.frame_id = world_frame_id;
+      del.header.stamp = ros::Time::now();
+      del.ns = ns;
+      del.id = id;
+      del.action = visualization_msgs::Marker::DELETE;
+      ma.markers.push_back(del);
+    }
+    comm_return_target_pub_.publish(ma);
+    return;
+  }
+
+  visualization_msgs::Marker sphere;
+  sphere.header.frame_id = world_frame_id;
+  sphere.header.stamp = ros::Time::now();
+  sphere.ns = ns;
+  sphere.id = 0;
+  sphere.action = visualization_msgs::Marker::ADD;
+  sphere.type = visualization_msgs::Marker::SPHERE;
+  sphere.pose.position.x = state[0];
+  sphere.pose.position.y = state[1];
+  sphere.pose.position.z = state[2] + 0.35;
+  sphere.pose.orientation.w = 1.0;
+  sphere.scale.x = 1.5;
+  sphere.scale.y = 1.5;
+  sphere.scale.z = 1.5;
+  sphere.color.r = 1.0f;
+  sphere.color.g = 0.2f;
+  sphere.color.b = 0.0f;
+  sphere.color.a = 0.95f;
+  sphere.lifetime = ros::Duration(0);
+  ma.markers.push_back(sphere);
+
+  visualization_msgs::Marker ring;
+  ring.header = sphere.header;
+  ring.ns = ns;
+  ring.id = 1;
+  ring.action = visualization_msgs::Marker::ADD;
+  ring.type = visualization_msgs::Marker::CYLINDER;
+  ring.pose.position.x = state[0];
+  ring.pose.position.y = state[1];
+  ring.pose.position.z = state[2] + 0.08;
+  ring.pose.orientation.w = 1.0;
+  ring.scale.x = 2.4;
+  ring.scale.y = 2.4;
+  ring.scale.z = 0.12;
+  ring.color.r = 1.0f;
+  ring.color.g = 0.85f;
+  ring.color.b = 0.0f;
+  ring.color.a = 0.55f;
+  ring.lifetime = ros::Duration(0);
+  ma.markers.push_back(ring);
+
+  visualization_msgs::Marker txt;
+  txt.header = sphere.header;
+  txt.ns = ns;
+  txt.id = 2;
+  txt.action = visualization_msgs::Marker::ADD;
+  txt.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+  txt.pose.position.x = state[0];
+  txt.pose.position.y = state[1];
+  txt.pose.position.z = state[2] + 2.2;
+  txt.pose.orientation.w = 1.0;
+  txt.scale.z = 0.65;
+  std::ostringstream oss;
+  oss << "R" << robot_id << " COMM CRITICAL (return here)";
+  txt.text = oss.str();
+  txt.color.r = 1.0f;
+  txt.color.g = 1.0f;
+  txt.color.b = 0.0f;
+  txt.color.a = 1.0f;
+  txt.lifetime = ros::Duration(0);
+  ma.markers.push_back(txt);
+
+  comm_return_target_pub_.publish(ma);
 }
 
 void Visualization::visualizeWorkspace(StateVec& state,

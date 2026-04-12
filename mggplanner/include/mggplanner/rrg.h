@@ -8,10 +8,13 @@
 #include <limits>
 #include <numeric>
 #include <string>
+#include <map>
 #include <unordered_map>
+#include <mutex>
 
 #include <eigen3/Eigen/Dense>
 #include <geometry_msgs/PointStamped.h>
+#include <geometry_msgs/Pose.h>
 #include <geometry_msgs/Polygon.h>
 #include <geometry_msgs/PolygonStamped.h>
 #include <kdtree/kdtree.h>
@@ -46,6 +49,7 @@
 #include "planner_common/random_sampler.h"
 #include "planner_common/trajectory.h"
 #include "planner_msgs/PlanningBound.h"
+#include "planner_msgs/GcaaBidPacket.h"
 #include "planner_msgs/PlanningMode.h"
 #include "planner_msgs/planner_dynamic_global_bound.h"
 #include "planner_msgs/planner_srv.h"
@@ -277,19 +281,64 @@ class Rrg {
 
   void neighbourGraphCallback(const planner_msgs::Graph& msg);
 
+  void gcaaBidCallback(const planner_msgs::GcaaBidPacketConstPtr& msg);
+
   void updateNeighbourGraph(const planner_msgs::Graph& graph_msg);
 
   void mergeNeighbourGraph(std::shared_ptr<GraphManager> graph_manager,
                               std::vector<std::pair<int,Vertex*>> merged_connecting_nodes,
                               std::shared_ptr<GraphManager> neighbour_graph_manager);
   bool satisfyCommunicationConstraint(const StateVec& candidate_state);
+  // Pairwise range graph on all peer frames: connected iff the team is in one component.
+  bool isTeamCommunicationConnected(const StateVec& self_state);
+  // Waypoint for return-to-relay: frozen pose when this robot leaves comm range.
+  void fillCommReturnWaypoint(geometry_msgs::Pose& pose);
+  void publishCommReturnTargetMarker();
+  void writeCommDisconnectMarkerFile();
+  // Same session dir as comm markers; empty if unavailable.
+  std::string commEventLogSessionDirectory() const;
+  void writeHomingFailureEvent(const std::string& event_name,
+                               const std::string& detail);
 
   std::string world_frame_ = "world";
   std::string self_base_frame_ = "";
-  bool comm_constraint_enable_ = false;
   bool comm_constraint_use_2d_ = true;
-  double comm_constraint_max_distance_ = 15.0;
   std::vector<std::string> comm_constraint_peer_frames_;
+  // TF frame for peer/self distance (default "world" to match Gazebo p3d / ground_truth).
+  std::string comm_distance_ref_frame_ = "world";
+  bool comm_disconnect_marker_enable_ = true;
+  // Empty: use visualization_tools/log[/session]. Non-empty: that directory only.
+  std::string comm_event_log_dir_;
+  // If non-empty, subdir under comm_event_log_dir; else use /mgg_metrics_session_stamp.
+  std::string comm_event_session_subdir_;
+  bool commTopologyEnabled() const {
+    return planning_params_.comm_topology_mode != CommTopologyMode::kOff;
+  }
+  bool commRelayTopology() const {
+    return planning_params_.comm_topology_mode == CommTopologyMode::kRelay;
+  }
+  // Relay: true after first transition to "team not globally connected" until reconnect.
+  bool comm_is_out_of_range_ = false;
+  // Sticky: team was disconnected at least once (for homing skip / boundary target).
+  bool comm_ever_disconnected_ = false;
+  bool comm_boundary_state_valid_ = false;
+  StateVec comm_boundary_state_;
+  double comm_boundary_battery_percent_ = 100.0;
+  double comm_boundary_return_threshold_percent_ = 50.0;
+  // Set once when the team loses global connectivity: this robot's pose while
+  // the team was last fully connected (pairwise range graph). Stays fixed until
+  // team_connected clears comm_relay_disconnect_latched_ (full reconnect).
+  StateVec comm_return_target_state_;
+  bool comm_return_target_valid_ = false;
+  // After first disconnect in a session, do not rewrite return pose / markers
+  // until isTeamCommunicationConnected is true again.
+  bool comm_relay_disconnect_latched_ = false;
+  // One marker file per disconnect episode; cleared when team reconnects.
+  bool comm_disconnect_marker_file_written_ = false;
+
+  std::string gcaa_bids_topic_;
+  std::mutex gcaa_bid_mutex_;
+  std::map<uint32_t, planner_msgs::GcaaBidPacket> gcaa_peer_packets_;
 
   uint32_t robot_id_ = 0;
 
@@ -305,11 +354,13 @@ class Rrg {
   ros::Publisher pci_reset_pub_;
   ros::Publisher neighbour_graph_pub_;
   ros::Publisher auction_frontier_markers_pub_;
+  ros::Publisher gcaa_bid_pub_;
 
   ros::Subscriber semantics_subscriber_;
   ros::Subscriber stop_srv_subscriber_;
   ros::Subscriber neighbour_graph_subscriber_;
   ros::Subscriber battery_remaining_percent_subscriber_;
+  ros::Subscriber gcaa_bid_subscriber_;
 
   ros::ServiceClient pci_homing_;
   ros::ServiceClient landing_srv_client_;

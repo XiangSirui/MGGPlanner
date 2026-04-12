@@ -1,13 +1,12 @@
 <launch>
-  <!-- Uncoordinated greedy-nearest-frontier baseline (global graph target).
-       Uses mgg_darpa_greedy_nearest.yaml; does not change other launch variants. -->
+  <!-- GCAA-lite iterative auction variant (backward-compatible opt-in). -->
   <arg name="robot_name" default="smb"/>
   <arg name="gazebo_gui_en" default="false"/>
   <arg name="use_sim_time" default="true"/>
   <arg name="rviz_en" default="true"/>
   <arg name="launch_prefix" default=""/>
-  <arg name="max_battery_distance" default="200.0"/>
-  <arg name="comm_topology_mode" default="strict"/>
+  <arg name="max_battery_distance" default="250.0"/>
+  <arg name="comm_topology_mode" default="relay"/>
   <arg name="comm_max_range_m" default="100.0"/>
   <arg name="comm_relay_battery_fraction" default="0.5"/>
   <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/pittsburgh_mine.world"/>
@@ -25,7 +24,8 @@
     <arg name="comm_relay_battery_fraction" value="$(arg comm_relay_battery_fraction)"/>
     <arg name="world_file" value="$(arg world_file)"/>
     <arg name="metrics_run_subdir" value="$(arg metrics_run_subdir)"/>
+    <arg name="gcaa_lite_enable" value="true"/>
     <arg name="mggplanner_config_file"
-         value="$(find mggplanner)/config/$(arg robot_name)/mgg_simple_greedy_nearest.yaml"/>
+         value="$(find mggplanner)/config/$(arg robot_name)/mgg_darpa_auction.yaml"/>
   </include>
 </launch>

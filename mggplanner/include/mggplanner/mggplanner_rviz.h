@@ -87,6 +87,9 @@ class Visualization {
       const std::vector<int>& cluster_ids);
 
   void visualizeRobotStateHistory(const std::vector<StateVec*> state_hist);
+  // Bright marker at the last in-range pose when this robot disconnects (return target).
+  void visualizeCommReturnTarget(const StateVec& state, uint32_t robot_id,
+                                 bool visible);
   // Visualize global planner paths. Path from current location to best frontier
   // and frontier to home location
   void visualizeGlobalPaths(const std::shared_ptr<GraphManager> graph_manager,
@@ -142,6 +145,7 @@ class Visualization {
   ros::Publisher state_history_pub_;
   ros::Publisher pcl_pub_;
   ros::Publisher path_pub_;
+  ros::Publisher comm_return_target_pub_;
 
   std::string world_frame_id = "world";
   // 0 = infinite

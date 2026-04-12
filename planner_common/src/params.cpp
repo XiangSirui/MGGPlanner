@@ -1,5 +1,7 @@
 #include "planner_common/params.h"
 
+#include <algorithm>
+
 bool SensorParamsBase::loadParams(std::string ns) {
   ROSPARAM_INFO("Loading: " + ns);
   std::string param_name;
@@ -1206,6 +1208,70 @@ bool PlanningParams::loadParams(std::string ns) {
     baseline_greedy_nearest_frontier_enable = false;
     ROSPARAM_WARN(param_name, baseline_greedy_nearest_frontier_enable);
   }
+
+  param_name = ns + "/independent_planning_enable";
+  if (!ros::param::get(param_name, independent_planning_enable)) {
+    independent_planning_enable = false;
+    ROSPARAM_WARN(param_name, independent_planning_enable);
+  }
+
+  param_name = ns + "/gcaa_lite_enable";
+  if (!ros::param::get(param_name, gcaa_lite_enable)) {
+    gcaa_lite_enable = false;
+    ROSPARAM_WARN(param_name, gcaa_lite_enable);
+  }
+
+  param_name = ns + "/gcaa_full_enable";
+  if (!ros::param::get(param_name, gcaa_full_enable)) {
+    gcaa_full_enable = false;
+    ROSPARAM_WARN(param_name, gcaa_full_enable);
+  }
+
+  param_name = ns + "/gcaa_bid_wait_sec";
+  if (!ros::param::get(param_name, gcaa_bid_wait_sec)) {
+    gcaa_bid_wait_sec = 0.05;
+    ROSPARAM_WARN(param_name, gcaa_bid_wait_sec);
+  }
+
+  param_name = ns + "/gcaa_bid_timeout_sec";
+  if (!ros::param::get(param_name, gcaa_bid_timeout_sec)) {
+    gcaa_bid_timeout_sec = 2.0;
+    ROSPARAM_WARN(param_name, gcaa_bid_timeout_sec);
+  }
+
+  parse_str.clear();
+  param_name = ns + "/comm_topology_mode";
+  ros::param::get(param_name, parse_str);
+  if (parse_str == "kStrict" || parse_str == "strict" ||
+      parse_str == "connected") {
+    comm_topology_mode = CommTopologyMode::kStrict;
+  } else if (parse_str == "kRelay" || parse_str == "relay" ||
+             parse_str == "disconnect_with_return") {
+    comm_topology_mode = CommTopologyMode::kRelay;
+  } else if (parse_str == "kOff" || parse_str == "off" ||
+             parse_str == "disabled" || parse_str.empty()) {
+    comm_topology_mode = CommTopologyMode::kOff;
+    if (parse_str.empty()) {
+      ROSPARAM_WARN(param_name, "off");
+    }
+  } else {
+    comm_topology_mode = CommTopologyMode::kOff;
+    ROSPARAM_WARN(param_name, "off");
+  }
+
+  param_name = ns + "/comm_max_range_m";
+  if (!ros::param::get(param_name, comm_max_range_m)) {
+    comm_max_range_m = 15.0;
+    ROSPARAM_WARN(param_name, comm_max_range_m);
+  }
+
+  param_name = ns + "/comm_relay_battery_fraction";
+  if (!ros::param::get(param_name, comm_relay_battery_fraction)) {
+    comm_relay_battery_fraction = 0.5;
+    ROSPARAM_WARN(param_name, comm_relay_battery_fraction);
+  }
+  comm_relay_battery_fraction =
+      std::max(0.0, std::min(1.0, comm_relay_battery_fraction));
 
   ROSPARAM_INFO("Done.");
   return true;

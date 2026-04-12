@@ -1,17 +1,18 @@
 <launch>
-  <!-- Uncoordinated greedy-nearest-frontier baseline (global graph target).
-       Uses mgg_darpa_greedy_nearest.yaml; does not change other launch variants. -->
+  <!-- Fully independent multi-robot variant: no neighbour global-graph sync. -->
   <arg name="robot_name" default="smb"/>
   <arg name="gazebo_gui_en" default="false"/>
   <arg name="use_sim_time" default="true"/>
   <arg name="rviz_en" default="true"/>
   <arg name="launch_prefix" default=""/>
-  <arg name="max_battery_distance" default="200.0"/>
+  <arg name="max_battery_distance" default="500.0"/>
   <arg name="comm_topology_mode" default="strict"/>
   <arg name="comm_max_range_m" default="100.0"/>
   <arg name="comm_relay_battery_fraction" default="0.5"/>
-  <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/pittsburgh_mine.world"/>
+  <arg name="world_file" default="$(find planner_gazebo_sim)/worlds/darpa_cave_02.world"/>
   <arg name="metrics_run_subdir" default=""/>
+  <arg name="global_metrics_enable" default="true"/>
+  <arg name="global_explored_volume_voxel_size" default="0.5"/>
 
   <include file="$(find mggplanner)/launch/smb/3smb_sim_mgg.launch">
     <arg name="robot_name" value="$(arg robot_name)"/>
@@ -25,7 +26,20 @@
     <arg name="comm_relay_battery_fraction" value="$(arg comm_relay_battery_fraction)"/>
     <arg name="world_file" value="$(arg world_file)"/>
     <arg name="metrics_run_subdir" value="$(arg metrics_run_subdir)"/>
+    <arg name="independent_planning_enable" value="true"/>
     <arg name="mggplanner_config_file"
-         value="$(find mggplanner)/config/$(arg robot_name)/mgg_simple_greedy_nearest.yaml"/>
+         value="$(find mggplanner)/config/$(arg robot_name)/mgg_darpa_greedy_nearest.yaml"/>
   </include>
+
+  <node if="$(arg global_metrics_enable)"
+        pkg="visualization_tools"
+        type="global_explored_volume.py"
+        name="global_explored_volume"
+        output="screen">
+    <param name="voxel_size" value="$(arg global_explored_volume_voxel_size)"/>
+    <rosparam param="cloud_topics">["/R1/mggplanner_node/surface_pointcloud","/R2/mggplanner_node/surface_pointcloud","/R3/mggplanner_node/surface_pointcloud"]</rosparam>
+    <param name="time_topic" value="/R1/ground_truth/state"/>
+    <param name="publish_topic" value="/overall_explored_volume"/>
+    <param name="metric_file" value="$(find visualization_tools)/log/overall_metrics.txt"/>
+  </node>
 </launch>

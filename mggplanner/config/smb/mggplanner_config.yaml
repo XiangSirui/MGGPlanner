@@ -170,6 +170,9 @@ PlanningParams:
   global_path_inclination_check: true
   go_home_if_fully_explored: true
   geofence_checking_enable: true
+  comm_topology_mode: relay
+  comm_max_range_m: 30.0
+  comm_relay_battery_fraction: 0.5
 
 AdaptiveObbParams:
   type: kPca

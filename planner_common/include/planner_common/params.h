@@ -258,6 +258,12 @@ enum RRModeType {
   kTree        // Tree based search,
 };
 
+// Multi-robot communication for RRG sampling and homing (see Rrg).
+// kOff: no peer-distance constraint.
+// kStrict: samples must stay within comm_max_range_m of the nearest peer (team stays in range).
+// kRelay: robots may leave range; on disconnect, reserve battery to return to the last in-range pose.
+enum class CommTopologyMode : int { kOff = 0, kStrict = 1, kRelay = 2 };
+
 struct PlanningParams {
   // robot id of the robot running the planner. 
   uint32_t robot_id;
@@ -343,6 +349,25 @@ struct PlanningParams {
   // frontier). Disables multi-robot auction filtering and legacy gain term for
   // that stage. Default false preserves original behavior.
   bool baseline_greedy_nearest_frontier_enable;
+  // If true: disable all neighbour global-graph publish/subscribe/merge so each
+  // robot plans independently without cross-robot global graph information.
+  bool independent_planning_enable;
+  // If true: enable iterative GCAA-like frontier assignment in auction mode.
+  // Default false keeps the previous single-pass auction behavior unchanged.
+  bool gcaa_lite_enable;
+  // If true: distributed GCAA — robots publish bid rows on /gcaa_bids (remap
+  // via gcaa_bids_topic), merge with TF fallback; takes precedence over
+  // gcaa_lite_enable when both set. Default false preserves all legacy paths.
+  bool gcaa_full_enable;
+  // After publishing bids, wait this long (spinOnce) so peers' packets arrive.
+  double gcaa_bid_wait_sec;
+  // Drop peer bid packets older than this (seconds) when merging.
+  double gcaa_bid_timeout_sec;
+  // Communication topology (multi-robot). See CommTopologyMode.
+  CommTopologyMode comm_topology_mode;
+  double comm_max_range_m;
+  // In kRelay: homing triggers when battery <= this fraction of the value recorded at last in-range pose.
+  double comm_relay_battery_fraction;
 
   bool loadParams(std::string ns);
   void setPlanningMode(PlanningModeType pmode);
