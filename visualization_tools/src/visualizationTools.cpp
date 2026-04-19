@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -104,6 +105,113 @@ float batteryRemainingDistance = 400.0f;
 float batteryRemainingPercent = 100.0f;
 bool batteryDepleted = false;
 
+// Optional multi-term battery model (equivalent meters per second / per m^3
+// mapped into the same budget as maxBatteryDistance for compatibility).
+bool battery_use_power_model = false;
+double battery_charge_01 = 1.0;
+double last_battery_integrator_time = -1.0;
+float exploration_load_scale_cached = 1.f;
+bool exploration_scale_have_msg = false;
+double battery_motion_linear_weight = 1.0;
+double battery_motion_yaw_rad_weight = 0.12;
+double battery_explore_fixed_equivalent_mps = 0.025;
+double battery_explore_volume_equivalent_per_m3 = 0.0025;
+double battery_comm_base_equivalent_mps = 0.006;
+double battery_comm_proximity_equivalent_mps = 0.0;
+double battery_comm_ref_distance_m = 30.0;
+bool battery_comm_use_pairwise = false;
+double battery_base_idle_equivalent_mps = 0.012;
+double battery_planning_load_equivalent_mps = 0.0;
+float min_peer_distance_m = 1e6f;
+int g_battery_robot_id = 0;
+int g_battery_num_robots = 3;
+float last_explored_volume_for_battery = 0.f;
+bool g_battery_volume_seeded = false;
+
+void explorationLoadScaleCb(const std_msgs::Float32ConstPtr& msg) {
+  exploration_load_scale_cached =
+      std::max(0.f, std::min(1.f, msg->data));
+  exploration_scale_have_msg = true;
+}
+
+void pairwiseDistCb(const std_msgs::Float32MultiArrayConstPtr& msg) {
+  const int n = g_battery_num_robots;
+  const int need = n * (n - 1) / 2;
+  if (static_cast<int>(msg->data.size()) < need) return;
+  const int r = std::max(0, g_battery_robot_id - 1);
+  if (n == 3 && r >= 0 && r < 3) {
+    const float d01 = msg->data[0];
+    const float d02 = msg->data[1];
+    const float d12 = msg->data[2];
+    if (r == 0)
+      min_peer_distance_m = std::min(d01, d02);
+    else if (r == 1)
+      min_peer_distance_m = std::min(d01, d12);
+    else
+      min_peer_distance_m = std::min(d02, d12);
+  }
+}
+
+void applyBatteryDrainFromOdom(double t_sec, float planar_dis_m,
+                               float yaw_delta_rad) {
+  if (!battery_use_power_model || !systemInited) return;
+  if (last_battery_integrator_time < 0.0) {
+    last_battery_integrator_time = t_sec;
+    return;
+  }
+  double dt = t_sec - last_battery_integrator_time;
+  last_battery_integrator_time = t_sec;
+  if (dt <= 1e-9 || dt > 5.0) return;
+
+  const double scale =
+      exploration_scale_have_msg ? exploration_load_scale_cached : 1.0;
+
+  const double motion_eq_m = battery_motion_linear_weight * planar_dis_m +
+                             battery_motion_yaw_rad_weight * yaw_delta_rad;
+  const double explore_eq_m =
+      scale * battery_explore_fixed_equivalent_mps * dt;
+  // Communication: default is constant self-TX (base only). Optional pairwise
+  // term only if battery_comm_use_pairwise and proximity coefficient > 0.
+  double comm_eq_m = battery_comm_base_equivalent_mps * dt;
+  if (battery_comm_use_pairwise &&
+      battery_comm_proximity_equivalent_mps > 1e-12 &&
+      min_peer_distance_m < 1e5f && battery_comm_ref_distance_m > 1e-6) {
+    const double nd = static_cast<double>(min_peer_distance_m);
+    const double x =
+        std::max(0.0, 1.0 - nd / battery_comm_ref_distance_m);
+    comm_eq_m += battery_comm_proximity_equivalent_mps * x * dt;
+  }
+  const double idle_eq_m = battery_base_idle_equivalent_mps * dt;
+  const double plan_eq_m = battery_planning_load_equivalent_mps * dt;
+
+  const double total_eq_m =
+      motion_eq_m + explore_eq_m + comm_eq_m + idle_eq_m + plan_eq_m;
+  const double denom =
+      std::max(static_cast<double>(1e-6), static_cast<double>(maxBatteryDistance));
+  battery_charge_01 -= total_eq_m / denom;
+  if (battery_charge_01 < 0.0) battery_charge_01 = 0.0;
+}
+
+void maybeApplyVolumeBatteryDrain(float new_volume_m3) {
+  if (!battery_use_power_model || !systemInited) return;
+  if (!g_battery_volume_seeded) {
+    g_battery_volume_seeded = true;
+    last_explored_volume_for_battery = new_volume_m3;
+    return;
+  }
+  const float dV = std::max(0.f, new_volume_m3 - last_explored_volume_for_battery);
+  last_explored_volume_for_battery = new_volume_m3;
+  if (dV <= 0.f) return;
+  const double scale =
+      exploration_scale_have_msg ? exploration_load_scale_cached : 1.0;
+  const double vol_eq_m =
+      scale * battery_explore_volume_equivalent_per_m3 * dV;
+  const double denom =
+      std::max(static_cast<double>(1e-6), static_cast<double>(maxBatteryDistance));
+  battery_charge_01 -= vol_eq_m / denom;
+  if (battery_charge_01 < 0.0) battery_charge_01 = 0.0;
+}
+
 pcl::VoxelGrid<pcl::PointXYZ> overallMapDwzFilter;
 pcl::VoxelGrid<pcl::PointXYZ> exploredAreaDwzFilter;
 pcl::VoxelGrid<pcl::PointXYZ> exploredVolumeDwzFilter;
@@ -128,6 +236,16 @@ void updateBatteryStatus()
     batteryRemainingDistance = 0.0f;
     batteryRemainingPercent = 0.0f;
     batteryDepleted = true;
+    return;
+  }
+
+  if (battery_use_power_model) {
+    battery_charge_01 = std::max(0.0, std::min(1.0, battery_charge_01));
+    batteryRemainingPercent =
+        static_cast<float>(100.0 * battery_charge_01);
+    batteryRemainingDistance =
+        static_cast<float>(maxBatteryDistance * battery_charge_01);
+    batteryDepleted = (battery_charge_01 <= 0.0);
     return;
   }
 
@@ -200,8 +318,12 @@ void odometryHandler(const nav_msgs::Odometry::ConstPtr& odom)
     pubTimeDurationPtr->publish(timeDurationMsg);
   }
 
-  // Always accumulate traveled distance for battery estimation.
+  // Always accumulate traveled distance for metrics / legacy battery.
   travelingDis += dis;
+  const float planar_dis =
+      static_cast<float>(std::sqrt(static_cast<double>(dx * dx + dy * dy)));
+  applyBatteryDrainFromOdom(systemTime, planar_dis, dYaw);
+
   updateBatteryStatus();
   publishBatteryAndStopIfNeeded();
 
@@ -263,6 +385,8 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn)
 
   exploredVolume = exploredVolumeVoxelSize * exploredVolumeVoxelSize * 
                    exploredVolumeVoxelSize * exploredVolumeCloud->points.size();
+
+  maybeApplyVolumeBatteryDrain(exploredVolume);
 
   *exploredAreaCloud += *laserCloud;
 
@@ -363,6 +487,8 @@ void laserCloudHandlerB1(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn)
   exploredVolume = exploredVolumeVoxelSize * exploredVolumeVoxelSize * 
                    exploredVolumeVoxelSize * exploredVolumeCloud->points.size();
 
+  maybeApplyVolumeBatteryDrain(exploredVolume);
+
   *exploredAreaCloud += *laserCloud;
 
   exploredAreaDisplayCount++;
@@ -459,6 +585,8 @@ void laserCloudHandlerB2(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn)
 
   exploredVolume = exploredVolumeVoxelSize * exploredVolumeVoxelSize * 
                    exploredVolumeVoxelSize * exploredVolumeCloud->points.size();
+
+  maybeApplyVolumeBatteryDrain(exploredVolume);
 
   *exploredAreaCloud += *laserCloud;
 
@@ -600,6 +728,38 @@ int main(int argc, char** argv)
   nhPrivate.getParam("exploredAreaDisplayInterval", exploredAreaDisplayInterval);
   nhPrivate.param("max_battery_distance", maxBatteryDistance, 400.0f);
 
+  g_battery_robot_id = robot_id_param;
+  nhPrivate.param("battery_num_robots", g_battery_num_robots, 3);
+  nhPrivate.param("battery_use_power_model", battery_use_power_model, false);
+  nhPrivate.param("battery_motion_linear_weight", battery_motion_linear_weight,
+                   1.0);
+  nhPrivate.param("battery_motion_yaw_rad_weight", battery_motion_yaw_rad_weight,
+                   0.12);
+  nhPrivate.param("battery_explore_fixed_equivalent_mps",
+                   battery_explore_fixed_equivalent_mps, 0.025);
+  nhPrivate.param("battery_explore_volume_equivalent_per_m3",
+                   battery_explore_volume_equivalent_per_m3, 0.0025);
+  nhPrivate.param("battery_comm_base_equivalent_mps",
+                   battery_comm_base_equivalent_mps, 0.006);
+  nhPrivate.param("battery_comm_proximity_equivalent_mps",
+                   battery_comm_proximity_equivalent_mps, 0.0);
+  nhPrivate.param("battery_comm_ref_distance_m", battery_comm_ref_distance_m,
+                   30.0);
+  nhPrivate.param("battery_comm_use_pairwise", battery_comm_use_pairwise, false);
+  nhPrivate.param("battery_base_idle_equivalent_mps",
+                   battery_base_idle_equivalent_mps, 0.012);
+  nhPrivate.param("battery_planning_load_equivalent_mps",
+                   battery_planning_load_equivalent_mps, 0.0);
+  if (battery_use_power_model) {
+    battery_charge_01 = 1.0;
+    last_battery_integrator_time = -1.0;
+    g_battery_volume_seeded = false;
+    ROS_INFO(
+        "[visualizationTools] battery_use_power_model=ON max_equiv_m=%.1f "
+        "robotID=%d",
+        static_cast<double>(maxBatteryDistance), g_battery_robot_id);
+  }
+
   nhPrivate.getParam("vehicleX", vehicleX);
   nhPrivate.getParam("vehicleY", vehicleY);
   nhPrivate.getParam("vehicleZ", vehicleZ);
@@ -618,6 +778,17 @@ int main(int argc, char** argv)
   ros::Subscriber subRuntime = nh.subscribe<std_msgs::Float32> ("runtime", 5, runtimeHandler);
 
   ros::Subscriber subgbRuntime = nh.subscribe<std_msgs::Float32MultiArray> ("gbp_time_log", 5, gbplannerruntimeHandler);
+
+  ros::Subscriber subExplorationScale = nh.subscribe<std_msgs::Float32>(
+      "exploration_load_scale", 10, explorationLoadScaleCb);
+  ros::Subscriber subPairwise;
+  if (battery_comm_use_pairwise) {
+    std::string battery_pairwise_topic;
+    nhPrivate.param("battery_pairwise_topic", battery_pairwise_topic,
+                    std::string("/inter_robot_pairwise_distances"));
+    subPairwise = nh.subscribe<std_msgs::Float32MultiArray>(
+        battery_pairwise_topic, 5, pairwiseDistCb);
+  }
 
   ros::Publisher pubOverallMap = nh.advertise<sensor_msgs::PointCloud2> ("overall_map", 5);
 

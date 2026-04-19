@@ -12,10 +12,10 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="rviz_en" default="true" />
   <arg name="launch_prefix" default=""/> <!-- gdb -ex run //args -->
-  <arg name="max_battery_distance" default="150.0"/>
+  <arg name="max_battery_distance" default="500.0"/>
   <!-- Multi-robot communication (RRG): strict = stay in range; relay = may disconnect, reserve battery to last in-range pose; off = disabled -->
   <arg name="comm_topology_mode" default="relay"/>
-  <arg name="comm_max_range_m" default="15.0"/>
+  <arg name="comm_max_range_m" default="30.0"/>
   <arg name="comm_relay_battery_fraction" default="0.5"/>
   <arg name="independent_planning_enable" default="false"/>
   <arg name="gcaa_lite_enable" default="false"/>
@@ -162,6 +162,8 @@
     <remap from="gbp_time_log" to="gbp_time_log"/>
     <param name="metrics_run_subdir" type="string" value="$(arg metrics_run_subdir)"/>
     <param name="metrics_use_session_subdir" type="bool" value="$(arg metrics_use_session_subdir)"/>
+    <param name="battery_use_power_model" type="bool" value="true"/>
+    <remap from="exploration_load_scale" to="mggplanner_node/exploration_load_scale"/>
   </node>
 
   <node pkg="visualization_tools" type="realTimePlot.py" name="realTimePlot" output="screen" respawn="true"/>
@@ -276,6 +278,8 @@
     <remap from="gbp_time_log" to="gbp_time_log"/>
     <param name="metrics_run_subdir" type="string" value="$(arg metrics_run_subdir)"/>
     <param name="metrics_use_session_subdir" type="bool" value="$(arg metrics_use_session_subdir)"/>
+    <param name="battery_use_power_model" type="bool" value="true"/>
+    <remap from="exploration_load_scale" to="mggplanner_node/exploration_load_scale"/>
   </node>
 
   <node pkg="visualization_tools" type="realTimePlot.py" name="realTimePlot" output="screen" respawn="true"/>
@@ -388,6 +392,8 @@
     <remap from="gbp_time_log" to="gbp_time_log"/>
     <param name="metrics_run_subdir" type="string" value="$(arg metrics_run_subdir)"/>
     <param name="metrics_use_session_subdir" type="bool" value="$(arg metrics_use_session_subdir)"/>
+    <param name="battery_use_power_model" type="bool" value="true"/>
+    <remap from="exploration_load_scale" to="mggplanner_node/exploration_load_scale"/>
   </node>
 
   <node pkg="visualization_tools" type="realTimePlot.py" name="realTimePlot" output="screen" respawn="true"/>

@@ -355,6 +355,7 @@ class Rrg {
   ros::Publisher neighbour_graph_pub_;
   ros::Publisher auction_frontier_markers_pub_;
   ros::Publisher gcaa_bid_pub_;
+  ros::Publisher exploration_load_scale_pub_;
 
   ros::Subscriber semantics_subscriber_;
   ros::Subscriber stop_srv_subscriber_;
@@ -367,6 +368,7 @@ class Rrg {
 
   void stopMsgCallback(const std_msgs::Bool& msg);
   void batteryRemainingPercentCallback(const std_msgs::Float32& msg);
+  void publishExplorationLoadScale(float scale);
 
   // Graphs.
   std::shared_ptr<GraphManager> local_graph_;
@@ -387,6 +389,14 @@ class Rrg {
   double getTimeElapsed();
   double getTimeRemained();
   bool isRemainingTimeSufficient(const double& time_cost, double& time_spare);
+  /** SOC % budget for a homing path length (linearized vs exploration calibration). */
+  double estimateHomingSocBudgetPercent(double path_length_m) const;
+  /**
+   * Relay: remaining-SOC floor implied by boundary snapshot SOC B (last team-
+   * connected sample), using comm_relay_return_reserve_percent or
+   * comm_relay_battery_fraction + comm_relay_homing_arrival_min_percent rules.
+   */
+  double computeRelayBoundarySocFloorPercent(double boundary_soc_percent) const;
 
   PlannerTriggerModeType planner_trigger_mode_;
 
@@ -562,6 +572,8 @@ class Rrg {
   bool local_exploration_ongoing_;
 
   bool homing_engaged_ = false;
+  /** When homing, battery model scales exploration sensing load toward this (0 = off). */
+  double homing_exploration_load_scale_ = 0.0;
   bool landing_engaged_ = false;
 
   //

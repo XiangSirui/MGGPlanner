@@ -331,7 +331,17 @@ struct PlanningParams {
   bool auto_homing_enable;
   bool homing_backward;
   bool battery_percent_homing_enable;
+  /** Legacy static SOC trigger when dynamic homing budget is disabled or path unknown. */
   double battery_percent_homing_threshold;
+  // When true (default), homing battery trigger uses path-length SOC estimate +
+  // battery_homing_trigger_safety_margin_percent instead of fixed YAML thresholds.
+  bool battery_homing_dynamic_threshold_enable;
+  /** Exploration-equivalent meters for a full 100% SOC (align with visualization_tools max_battery_distance). */
+  double battery_equivalent_full_distance_m;
+  /** Homing energy per meter / exploration-equivalent energy per meter (0–2 typical). */
+  double battery_homing_energy_cost_ratio;
+  /** Added to computed homing SOC cost before comparing to battery_remaining_percent_. */
+  double battery_homing_trigger_safety_margin_percent;
   double time_budget_limit;
   bool auto_landing_enable;
   double time_budget_before_landing;
@@ -366,8 +376,16 @@ struct PlanningParams {
   // Communication topology (multi-robot). See CommTopologyMode.
   CommTopologyMode comm_topology_mode;
   double comm_max_range_m;
-  // In kRelay: homing triggers when battery <= this fraction of the value recorded at last in-range pose.
+  // kRelay: SOC floor from last team-connected boundary snapshot B. When
+  // battery_homing_dynamic_threshold_enable and robot is relay-disconnected,
+  // homing triggers when remaining <= max(path_soc_budget + margin, this floor).
+  // When dynamic is false, homing uses this floor alone (same formulas).
   double comm_relay_battery_fraction;
+  // If > 0, floor is max(comm_relay_homing_arrival_min_percent, B - reserve_pp)
+  // instead of B * comm_relay_battery_fraction.
+  double comm_relay_return_reserve_percent;
+  // Minimum floor when using reserve mode (see comm_relay_return_reserve_percent).
+  double comm_relay_homing_arrival_min_percent;
 
   bool loadParams(std::string ns);
   void setPlanningMode(PlanningModeType pmode);

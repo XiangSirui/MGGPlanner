@@ -1023,6 +1023,34 @@ bool PlanningParams::loadParams(std::string ns) {
     ROSPARAM_WARN(param_name, battery_percent_homing_threshold);
   }
 
+  param_name = ns + "/battery_homing_dynamic_threshold_enable";
+  if (!ros::param::get(param_name, battery_homing_dynamic_threshold_enable)) {
+    battery_homing_dynamic_threshold_enable = true;
+    ROSPARAM_WARN(param_name, battery_homing_dynamic_threshold_enable);
+  }
+  param_name = ns + "/battery_equivalent_full_distance_m";
+  if (!ros::param::get(param_name, battery_equivalent_full_distance_m)) {
+    battery_equivalent_full_distance_m = 500.0;
+    ROSPARAM_WARN(param_name, battery_equivalent_full_distance_m);
+  }
+  battery_equivalent_full_distance_m = std::max(1e-3, battery_equivalent_full_distance_m);
+
+  param_name = ns + "/battery_homing_energy_cost_ratio";
+  if (!ros::param::get(param_name, battery_homing_energy_cost_ratio)) {
+    battery_homing_energy_cost_ratio = 0.4;
+    ROSPARAM_WARN(param_name, battery_homing_energy_cost_ratio);
+  }
+  battery_homing_energy_cost_ratio =
+      std::max(0.0, std::min(5.0, battery_homing_energy_cost_ratio));
+
+  param_name = ns + "/battery_homing_trigger_safety_margin_percent";
+  if (!ros::param::get(param_name, battery_homing_trigger_safety_margin_percent)) {
+    battery_homing_trigger_safety_margin_percent = 3.0;
+    ROSPARAM_WARN(param_name, battery_homing_trigger_safety_margin_percent);
+  }
+  battery_homing_trigger_safety_margin_percent =
+      std::max(0.0, std::min(50.0, battery_homing_trigger_safety_margin_percent));
+
   param_name = ns + "/geofence_checking_enable";
   if (!ros::param::get(param_name, geofence_checking_enable)) {
     geofence_checking_enable = false;
@@ -1272,6 +1300,22 @@ bool PlanningParams::loadParams(std::string ns) {
   }
   comm_relay_battery_fraction =
       std::max(0.0, std::min(1.0, comm_relay_battery_fraction));
+
+  param_name = ns + "/comm_relay_return_reserve_percent";
+  if (!ros::param::get(param_name, comm_relay_return_reserve_percent)) {
+    comm_relay_return_reserve_percent = 0.0;
+    ROSPARAM_WARN(param_name, comm_relay_return_reserve_percent);
+  }
+  comm_relay_return_reserve_percent =
+      std::max(0.0, std::min(100.0, comm_relay_return_reserve_percent));
+
+  param_name = ns + "/comm_relay_homing_arrival_min_percent";
+  if (!ros::param::get(param_name, comm_relay_homing_arrival_min_percent)) {
+    comm_relay_homing_arrival_min_percent = 3.0;
+    ROSPARAM_WARN(param_name, comm_relay_homing_arrival_min_percent);
+  }
+  comm_relay_homing_arrival_min_percent =
+      std::max(0.0, std::min(100.0, comm_relay_homing_arrival_min_percent));
 
   ROSPARAM_INFO("Done.");
   return true;

@@ -167,6 +167,12 @@ PlanningParams:
   relaxed_corridor_multiplier: 1.5
   homing_backward: false
   auto_homing_enable: true
+  battery_percent_homing_enable: true
+  battery_percent_homing_threshold: 50.0
+  battery_homing_dynamic_threshold_enable: true
+  battery_equivalent_full_distance_m: 500.0
+  battery_homing_energy_cost_ratio: 0.4
+  battery_homing_trigger_safety_margin_percent: 3.0
   time_budget_limit: 3600 # seconds
   global_frame_id: world
   global_path_inclination_check: true
@@ -174,7 +180,10 @@ PlanningParams:
   geofence_checking_enable: true
   comm_topology_mode: relay
   comm_max_range_m: 30.0
+  # With dynamic homing: trigger uses max(path_SOC_budget + margin, relay floor from boundary B).
   comm_relay_battery_fraction: 0.5
+  comm_relay_return_reserve_percent: 0.0
+  comm_relay_homing_arrival_min_percent: 3.0
 
 AdaptiveObbParams:
   type: kPca
@@ -192,3 +201,10 @@ GeofenceParams:
   GRight:
     center: [0.0, -4.0, 0.0]
     size:   [6.0, 2.0, 0.0]
+
+#-------------------------------------------------------------------------------
+# Battery / exploration load interface (mggplanner_node private namespace)
+#-------------------------------------------------------------------------------
+BatteryInterface:
+  # When homing, visualization_tools scales exploration-related drain by this (0 = off).
+  homing_exploration_load_scale: 0.0

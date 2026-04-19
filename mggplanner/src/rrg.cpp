@@ -165,6 +165,13 @@ void Rrg::initializeAttributes() {
 
   time_log_pub_ =
       nh_.advertise<std_msgs::Float32MultiArray>("gbp_time_log", 10);
+  exploration_load_scale_pub_ =
+      nh_.advertise<std_msgs::Float32>("exploration_load_scale", 10, true);
+  {
+    std_msgs::Float32 m0;
+    m0.data = 1.0f;
+    exploration_load_scale_pub_.publish(m0);
+  }
 
   pci_homing_ = nh_.serviceClient<std_srvs::Trigger>(
       "planner_control_interface/std_srvs/homing_trigger");
@@ -479,6 +486,13 @@ void Rrg::stopMsgCallback(const std_msgs::Bool& msg) {
 
 void Rrg::batteryRemainingPercentCallback(const std_msgs::Float32& msg) {
   battery_remaining_percent_ = msg.data;
+}
+
+void Rrg::publishExplorationLoadScale(float scale) {
+  std_msgs::Float32 m;
+  m.data = static_cast<float>(
+      std::max(0.0, std::min(1.0, static_cast<double>(scale))));
+  exploration_load_scale_pub_.publish(m);
 }
 
 bool Rrg::sampleVertex(Vertex& vertex) {
@@ -3213,7 +3227,9 @@ bool Rrg::loadParams(bool shared_params) {
   // Communication modes (PlanningParams/comm_topology_mode):
   // strict — RRG samples must keep the team pairwise graph connected (globally).
   // relay — may break connectivity; on first global disconnect, freeze return
-  //         pose and use comm_relay_battery_fraction for reserve-to-return homing.
+  //         pose. Homing SOC trigger: path-based budget (when dynamic) is
+  //         max'd with a boundary snapshot floor from last-connected SOC B
+  //         (comm_relay_*); legacy non-dynamic relay uses the floor alone.
   // off — no peer-distance constraint in RRG.
   if (nh_private_.hasParam("comm_constraint_enable") ||
       nh_private_.hasParam("comm_constraint_allow_disconnect")) {
@@ -3468,6 +3484,11 @@ bool Rrg::loadParams(bool shared_params) {
   // planning_params_.v_max = robot_dynamics_params_.v_max;
   // planning_params_.v_homing_max = robot_dynamics_params_.v_homing_max;
 
+  nh_private_.param("BatteryInterface/homing_exploration_load_scale",
+                      homing_exploration_load_scale_, 0.0);
+  homing_exploration_load_scale_ =
+      std::max(0.0, std::min(1.0, homing_exploration_load_scale_));
+
   // All other relevant const values should be initialized in this call
   // after loading parameters for all fields.
   initializeParams();
@@ -3696,8 +3717,19 @@ void Rrg::writeCommDisconnectMarkerFile() {
   out << "return_pose_z=" << comm_return_target_state_[2] << "\n";
   out << "return_pose_yaw=" << comm_return_target_state_[3] << "\n";
   out << "boundary_battery_percent=" << comm_boundary_battery_percent_ << "\n";
-  out << "relay_return_threshold_percent="
-      << comm_boundary_return_threshold_percent_ << "\n";
+  out << "battery_homing_dynamic_threshold_enable="
+      << (planning_params_.battery_homing_dynamic_threshold_enable ? "true"
+                                                                  : "false")
+      << "\n";
+  if (planning_params_.battery_homing_dynamic_threshold_enable) {
+    out << "relay_boundary_soc_floor_percent="
+        << comm_boundary_return_threshold_percent_ << "\n";
+    out << "note=homing_SOC_trigger_uses_max(path_soc_budget_plus_margin,"
+        << "relay_boundary_soc_floor_percent)_while_disconnected\n";
+  } else {
+    out << "relay_return_threshold_percent="
+        << comm_boundary_return_threshold_percent_ << "\n";
+  }
   out << "comm_max_range_m=" << planning_params_.comm_max_range_m << "\n";
   out << "log_dir=" << dir << "\n";
   out.close();
@@ -4904,18 +4936,52 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
     // Relay mode: if we never left comm range, skip auto homing.
     const bool comm_skip_auto_homing =
         commRelayTopology() && !comm_ever_disconnected_;
-    double battery_homing_threshold =
-        planning_params_.battery_percent_homing_threshold;
     const bool use_comm_boundary_as_target =
         commRelayTopology() && comm_boundary_state_valid_ &&
         comm_ever_disconnected_;
-    // Battery threshold: only switch to "half of boundary battery" while
-    // currently out of range (after first disconnect).
     const bool use_comm_boundary_battery_threshold =
         use_comm_boundary_as_target && comm_is_out_of_range_;
-    if (use_comm_boundary_battery_threshold) {
-      battery_homing_threshold = comm_boundary_return_threshold_percent_;
+
+    std::vector<geometry_msgs::Pose> homing_path_preview;
+    if (use_comm_boundary_as_target) {
+      geometry_msgs::PoseStamped boundary_waypoint;
+      boundary_waypoint.header.stamp = ros::Time::now();
+      boundary_waypoint.header.frame_id = world_frame_;
+      fillCommReturnWaypoint(boundary_waypoint.pose);
+      homing_path_preview = getGlobalPath(boundary_waypoint);
+    } else {
+      Vertex* root_vertex = local_graph_->getVertex(0);
+      homing_path_preview = searchHomingPath(tgt_frame, root_vertex->state);
     }
+    double preview_len_m = 0.0;
+    if (!homing_path_preview.empty()) {
+      preview_len_m = Trajectory::getPathLength(homing_path_preview);
+    }
+
+    double battery_homing_threshold = 0.0;
+    if (planning_params_.battery_homing_dynamic_threshold_enable) {
+      double T_path = planning_params_.battery_percent_homing_threshold;
+      if (!homing_path_preview.empty()) {
+        T_path = estimateHomingSocBudgetPercent(preview_len_m) +
+                 planning_params_.battery_homing_trigger_safety_margin_percent;
+      }
+      battery_homing_threshold = T_path;
+      // Relay + disconnected: also respect a SOC floor derived from the last
+      // team-connected boundary snapshot B (comm_relay_*), so return is not
+      // planned from path budget alone.
+      if (use_comm_boundary_battery_threshold) {
+        const double T_relay = computeRelayBoundarySocFloorPercent(
+            comm_boundary_battery_percent_);
+        battery_homing_threshold = std::max(T_path, T_relay);
+      }
+    } else {
+      battery_homing_threshold =
+          planning_params_.battery_percent_homing_threshold;
+      if (use_comm_boundary_battery_threshold) {
+        battery_homing_threshold = comm_boundary_return_threshold_percent_;
+      }
+    }
+
     // Not == : trigger when remaining charge is at or below critical (<=).
     // Epsilon avoids missing the window due to float noise or coarse battery
     // topic steps (e.g. only integer percent published).
@@ -4935,21 +5001,15 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
     if (!comm_skip_auto_homing && battery_at_or_below_critical) {
       ROS_WARN_COND(
           global_verbosity >= Verbosity::PLANNER_STATUS,
-          "BATTERY CRITICAL: %.2f%% at/below threshold %.2f%% (eps=%.2f) --> %s.",
+          "BATTERY CRITICAL: %.2f%% at/below computed budget %.2f%% (eps=%.2f) "
+          "path_len=%.2fm dynamic=%d --> %s.",
           battery_remaining_percent_,
           battery_homing_threshold,
           kBatteryCriticalEps,
+          preview_len_m,
+          planning_params_.battery_homing_dynamic_threshold_enable ? 1 : 0,
           use_comm_boundary_as_target ? "COMM-BOUNDARY HOMING" : "HOMING");
-      if (use_comm_boundary_as_target) {
-        geometry_msgs::PoseStamped boundary_waypoint;
-        boundary_waypoint.header.stamp = ros::Time::now();
-        boundary_waypoint.header.frame_id = world_frame_;
-        fillCommReturnWaypoint(boundary_waypoint.pose);
-        homing_path = getGlobalPath(boundary_waypoint);
-      } else {
-        Vertex* root_vertex = local_graph_->getVertex(0);
-        homing_path = searchHomingPath(tgt_frame, root_vertex->state);
-      }
+      homing_path = homing_path_preview;
       if (homing_path.empty()) {
         std::ostringstream detail;
         detail << "battery_threshold_trigger path_empty "
@@ -4958,10 +5018,14 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
                                                  : "searchHomingPath_root")
                << " battery_remaining_percent=" << battery_remaining_percent_
                << " threshold_used=" << battery_homing_threshold
-               << " yaml_battery_percent_homing_threshold="
+               << " battery_percent_homing_threshold="
                << planning_params_.battery_percent_homing_threshold
                << " use_comm_boundary_battery_threshold="
                << (use_comm_boundary_battery_threshold ? "true" : "false")
+               << " dynamic_threshold="
+               << (planning_params_.battery_homing_dynamic_threshold_enable
+                       ? "true"
+                       : "false")
                << " global_graph_vertices=" << global_graph_->getNumVertices();
         writeHomingFailureEvent("battery_threshold_homing_failed", detail.str());
         ROS_ERROR(
@@ -4987,24 +5051,16 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
       }
       visualization_->visualizeRefPath(homing_path);
       homing_engaged_ = true;
+      publishExplorationLoadScale(
+          static_cast<float>(homing_exploration_load_scale_));
       return homing_path;
     }
     if (!comm_skip_auto_homing) {
       // Check two conditions whatever which one comes first.
       double time_remaining =
           std::min(time_budget_remaining, current_battery_time_remaining_);
-      if (use_comm_boundary_as_target) {
-        geometry_msgs::PoseStamped boundary_waypoint;
-        boundary_waypoint.header.stamp = ros::Time::now();
-        boundary_waypoint.header.frame_id = world_frame_;
-      fillCommReturnWaypoint(boundary_waypoint.pose);
-      homing_path = getGlobalPath(boundary_waypoint);
-    } else {
-      // Start searching from current root vertex of spanning local graph.
-      Vertex* root_vertex = local_graph_->getVertex(0);
-      homing_path = searchHomingPath(tgt_frame, root_vertex->state);
-    }
-    if (!homing_path.empty()) {
+      homing_path = homing_path_preview;
+      if (!homing_path.empty()) {
       double homing_len = Trajectory::getPathLength(homing_path);
       double time_to_home = homing_len / planning_params_.v_homing_max;
       ROS_INFO_COND(global_verbosity >= Verbosity::INFO, "Time to home: %f; Time remaining: %f", time_to_home,
@@ -5033,6 +5089,8 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
 
           visualization_->visualizeRefPath(homing_path);
           homing_engaged_ = true;
+          publishExplorationLoadScale(
+              static_cast<float>(homing_exploration_load_scale_));
           return homing_path;
         }
       } else {
@@ -5167,6 +5225,9 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
   }
 
   visualization_->visualizeRefPath(ret);
+
+  homing_engaged_ = false;
+  publishExplorationLoadScale(1.0f);
 
   return ret;
 }
@@ -5754,9 +5815,7 @@ void Rrg::setState(StateVec& state) {
       comm_boundary_state_valid_ = true;
       comm_boundary_battery_percent_ = battery_remaining_percent_;
       comm_boundary_return_threshold_percent_ =
-          std::max(0.0,
-                   std::min(100.0, comm_boundary_battery_percent_ *
-                                       planning_params_.comm_relay_battery_fraction));
+          computeRelayBoundarySocFloorPercent(comm_boundary_battery_percent_);
     } else {
       comm_ever_disconnected_ = true;
       if (!comm_relay_disconnect_latched_) {
@@ -5769,11 +5828,24 @@ void Rrg::setState(StateVec& state) {
                       "return target = last pose while team was connected (%.2f, %.2f).",
                       robot_id_, comm_return_target_state_[0],
                       comm_return_target_state_[1]);
-        ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
-                      "[CommunicationConstraint] boundary battery=%.1f%%, "
-                      "relay return threshold=%.1f%%",
-                      comm_boundary_battery_percent_,
-                      comm_boundary_return_threshold_percent_);
+        if (planning_params_.battery_homing_dynamic_threshold_enable) {
+          ROS_WARN_COND(
+              global_verbosity >= Verbosity::WARN,
+              "[CommunicationConstraint] boundary battery=%.1f%%, relay SOC "
+              "floor from boundary=%.1f%% (homing trigger uses max(path SOC "
+              "budget + margin, this floor) while disconnected).",
+              comm_boundary_battery_percent_,
+              comm_boundary_return_threshold_percent_);
+        } else {
+          ROS_WARN_COND(
+              global_verbosity >= Verbosity::WARN,
+              "[CommunicationConstraint] boundary battery=%.1f%%, "
+              "relay return threshold=%.1f%% (reserve_pp=%.1f min_floor=%.1f)",
+              comm_boundary_battery_percent_,
+              comm_boundary_return_threshold_percent_,
+              planning_params_.comm_relay_return_reserve_percent,
+              planning_params_.comm_relay_homing_arrival_min_percent);
+        }
         writeCommDisconnectMarkerFile();
       } else {
         comm_is_out_of_range_ = true;
@@ -5806,6 +5878,20 @@ void Rrg::timerCallback(const ros::TimerEvent& event) {
   if (!odometry_ready) {
     ROS_WARN_COND(global_verbosity >= Verbosity::WARN, "Planner is waiting for odometry");
     return;
+  }
+
+  if (homing_engaged_ && planning_params_.battery_percent_homing_enable) {
+    constexpr double kHomingArrivalEps = 0.05;
+    const double min_soc =
+        planning_params_.battery_homing_trigger_safety_margin_percent;
+    if (min_soc > 0.0 &&
+        battery_remaining_percent_ < min_soc + kHomingArrivalEps) {
+      ROS_WARN_THROTTLE(
+          10.0,
+          "[Homing] R%u: battery %.2f%% below arrival safety floor %.2f%% "
+          "(while homing engaged).",
+          robot_id_, battery_remaining_percent_, min_soc);
+    }
   }
 
   if (landing_engaged_ && robot_params_.type == RobotType::kAerialRobot) {
@@ -6185,6 +6271,26 @@ bool Rrg::connectStateToGraph(std::shared_ptr<GraphManager> graph,
   return connect_state_to_graph;
 }
 
+double Rrg::estimateHomingSocBudgetPercent(double path_length_m) const {
+  const double D = planning_params_.battery_equivalent_full_distance_m;
+  const double r = planning_params_.battery_homing_energy_cost_ratio;
+  return std::min(100.0, (path_length_m * r / D) * 100.0);
+}
+
+double Rrg::computeRelayBoundarySocFloorPercent(
+    double boundary_soc_percent) const {
+  const double b_soc = boundary_soc_percent;
+  const double min_floor =
+      planning_params_.comm_relay_homing_arrival_min_percent;
+  if (planning_params_.comm_relay_return_reserve_percent > 1e-6) {
+    return std::max(
+        min_floor,
+        std::min(100.0, b_soc - planning_params_.comm_relay_return_reserve_percent));
+  }
+  return std::max(0.0,
+                  std::min(100.0, b_soc * planning_params_.comm_relay_battery_fraction));
+}
+
 double Rrg::getTimeElapsed() {
   double time_elapsed = 0.0;
   if ((ros::Time::now()).toSec() != 0.0) {
@@ -6312,6 +6418,8 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
           ret_path = getHomingPath(world_frame_);
         }
         homing_engaged_ = true;
+        publishExplorationLoadScale(
+            static_cast<float>(homing_exploration_load_scale_));
       }
     } else {
       num_low_gain_iters_ = 0;

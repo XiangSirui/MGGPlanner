@@ -167,7 +167,15 @@ PlanningParams:
   homing_backward: false
   auto_homing_enable: true
   battery_percent_homing_enable: true
+  # Used only when dynamic homing budget is off or homing path is unavailable.
   battery_percent_homing_threshold: 50.0
+  battery_homing_dynamic_threshold_enable: true
+  # 100% SOC ~= this many exploration-equivalent meters (match visualization_tools max_battery_distance).
+  battery_equivalent_full_distance_m: 500.0
+  # Homing energy per meter / exploration-equivalent per meter (return leg cheaper than explore).
+  battery_homing_energy_cost_ratio: 0.4
+  # Added to path-derived SOC cost before comparing to remaining SOC (small end margin).
+  battery_homing_trigger_safety_margin_percent: 3.0
   time_budget_limit: 3600 # 3600 seconds
   global_frame_id: map
   global_path_inclination_check: true
@@ -175,7 +183,12 @@ PlanningParams:
   geofence_checking_enable: true
   comm_topology_mode: relay
   comm_max_range_m: 30.0
+  # Relay SOC floor from last-connected boundary B (not necessarily 0.5*B; tune for policy).
+  # With battery_homing_dynamic_threshold_enable, homing triggers at
+  # max(path_SOC_budget + margin, this floor) while disconnected.
   comm_relay_battery_fraction: 0.5
+  comm_relay_return_reserve_percent: 0.0
+  comm_relay_homing_arrival_min_percent: 3.0
 
 AdaptiveObbParams:
   type: kPca
