@@ -189,6 +189,25 @@ PlanningParams:
   comm_relay_battery_fraction: 0.5
   comm_relay_return_reserve_percent: 0.0
   comm_relay_homing_arrival_min_percent: 3.0
+  # Pairwise team links (all comm modes that use the graph): map rays + PL/SNR.
+  comm_link_model_enable: true
+  comm_link_ray_count: 9
+  comm_link_ray_half_angle_rad: 0.08726646259971647
+  comm_link_pl0_db: 40.0
+  comm_link_path_loss_exp_los: 2.0
+  comm_link_path_loss_exp_nlos: 3.5
+  comm_link_d0_m: 1.0
+  comm_link_unknown_penalty_db: 12.0
+  comm_link_ray_stop_at_unknown: false
+  comm_link_ptx_dbm: 20.0
+  comm_link_noise_floor_dbm: -95.0
+  comm_link_min_snr_db: 6.0
+  comm_link_snr_hysteresis_db: 2.0
+  comm_link_max_blocked_ratio: 0.34
+  comm_link_blocked_ratio_hysteresis: 0.06
+  comm_link_edge_hold_sec: 0.8
+  comm_link_fallback_distance_if_inconclusive: true
+  comm_link_viz_enable: true
 
 AdaptiveObbParams:
   type: kPca

@@ -19,6 +19,8 @@
 #include "planner_common/random_sampler.h"
 #include "planner_common/trajectory.h"
 
+#include "mggplanner/comm_link_model.h"
+
 namespace explorer {
 
 class Visualization {
@@ -90,6 +92,10 @@ class Visualization {
   // Bright marker at the last in-range pose when this robot disconnects (return target).
   void visualizeCommReturnTarget(const StateVec& state, uint32_t robot_id,
                                  bool visible);
+  /** LINE_LIST segments between peer frames; color from SNR when edge_ok. */
+  void visualizeCommTeamLinks(uint32_t robot_id,
+                              const std::vector<CommTeamLinkViz>& links,
+                              double min_snr_db_for_color);
   // Visualize global planner paths. Path from current location to best frontier
   // and frontier to home location
   void visualizeGlobalPaths(const std::shared_ptr<GraphManager> graph_manager,
@@ -146,6 +152,7 @@ class Visualization {
   ros::Publisher pcl_pub_;
   ros::Publisher path_pub_;
   ros::Publisher comm_return_target_pub_;
+  ros::Publisher comm_team_links_pub_;
 
   std::string world_frame_id = "world";
   // 0 = infinite

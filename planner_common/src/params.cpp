@@ -1317,6 +1317,122 @@ bool PlanningParams::loadParams(std::string ns) {
   comm_relay_homing_arrival_min_percent =
       std::max(0.0, std::min(100.0, comm_relay_homing_arrival_min_percent));
 
+  param_name = ns + "/comm_link_model_enable";
+  if (!ros::param::get(param_name, comm_link_model_enable)) {
+    comm_link_model_enable = true;
+    ROSPARAM_WARN(param_name, comm_link_model_enable);
+  }
+
+  param_name = ns + "/comm_link_ray_count";
+  if (!ros::param::get(param_name, comm_link_ray_count)) {
+    comm_link_ray_count = 9;
+    ROSPARAM_WARN(param_name, comm_link_ray_count);
+  }
+  comm_link_ray_count = std::max(3, std::min(comm_link_ray_count, 64));
+
+  param_name = ns + "/comm_link_ray_half_angle_rad";
+  if (!ros::param::get(param_name, comm_link_ray_half_angle_rad)) {
+    comm_link_ray_half_angle_rad = 5.0 * M_PI / 180.0;
+    ROSPARAM_WARN(param_name, comm_link_ray_half_angle_rad);
+  }
+
+  param_name = ns + "/comm_link_pl0_db";
+  if (!ros::param::get(param_name, comm_link_pl0_db)) {
+    comm_link_pl0_db = 40.0;
+    ROSPARAM_WARN(param_name, comm_link_pl0_db);
+  }
+
+  param_name = ns + "/comm_link_path_loss_exp_los";
+  if (!ros::param::get(param_name, comm_link_path_loss_exp_los)) {
+    comm_link_path_loss_exp_los = 2.0;
+    ROSPARAM_WARN(param_name, comm_link_path_loss_exp_los);
+  }
+
+  param_name = ns + "/comm_link_path_loss_exp_nlos";
+  if (!ros::param::get(param_name, comm_link_path_loss_exp_nlos)) {
+    comm_link_path_loss_exp_nlos = 3.5;
+    ROSPARAM_WARN(param_name, comm_link_path_loss_exp_nlos);
+  }
+
+  param_name = ns + "/comm_link_d0_m";
+  if (!ros::param::get(param_name, comm_link_d0_m)) {
+    comm_link_d0_m = 1.0;
+    ROSPARAM_WARN(param_name, comm_link_d0_m);
+  }
+  comm_link_d0_m = std::max(0.1, comm_link_d0_m);
+
+  param_name = ns + "/comm_link_unknown_penalty_db";
+  if (!ros::param::get(param_name, comm_link_unknown_penalty_db)) {
+    comm_link_unknown_penalty_db = 12.0;
+    ROSPARAM_WARN(param_name, comm_link_unknown_penalty_db);
+  }
+
+  param_name = ns + "/comm_link_ray_stop_at_unknown";
+  if (!ros::param::get(param_name, comm_link_ray_stop_at_unknown)) {
+    comm_link_ray_stop_at_unknown = false;
+    ROSPARAM_WARN(param_name, comm_link_ray_stop_at_unknown);
+  }
+
+  param_name = ns + "/comm_link_ptx_dbm";
+  if (!ros::param::get(param_name, comm_link_ptx_dbm)) {
+    comm_link_ptx_dbm = 20.0;
+    ROSPARAM_WARN(param_name, comm_link_ptx_dbm);
+  }
+
+  param_name = ns + "/comm_link_noise_floor_dbm";
+  if (!ros::param::get(param_name, comm_link_noise_floor_dbm)) {
+    comm_link_noise_floor_dbm = -95.0;
+    ROSPARAM_WARN(param_name, comm_link_noise_floor_dbm);
+  }
+
+  param_name = ns + "/comm_link_min_snr_db";
+  if (!ros::param::get(param_name, comm_link_min_snr_db)) {
+    comm_link_min_snr_db = 6.0;
+    ROSPARAM_WARN(param_name, comm_link_min_snr_db);
+  }
+
+  param_name = ns + "/comm_link_snr_hysteresis_db";
+  if (!ros::param::get(param_name, comm_link_snr_hysteresis_db)) {
+    comm_link_snr_hysteresis_db = 2.0;
+    ROSPARAM_WARN(param_name, comm_link_snr_hysteresis_db);
+  }
+  comm_link_snr_hysteresis_db = std::max(0.0, comm_link_snr_hysteresis_db);
+
+  param_name = ns + "/comm_link_max_blocked_ratio";
+  if (!ros::param::get(param_name, comm_link_max_blocked_ratio)) {
+    comm_link_max_blocked_ratio = 0.34;
+    ROSPARAM_WARN(param_name, comm_link_max_blocked_ratio);
+  }
+  comm_link_max_blocked_ratio =
+      std::max(0.0, std::min(1.0, comm_link_max_blocked_ratio));
+
+  param_name = ns + "/comm_link_blocked_ratio_hysteresis";
+  if (!ros::param::get(param_name, comm_link_blocked_ratio_hysteresis)) {
+    comm_link_blocked_ratio_hysteresis = 0.06;
+    ROSPARAM_WARN(param_name, comm_link_blocked_ratio_hysteresis);
+  }
+  comm_link_blocked_ratio_hysteresis =
+      std::max(0.0, std::min(0.5, comm_link_blocked_ratio_hysteresis));
+
+  param_name = ns + "/comm_link_edge_hold_sec";
+  if (!ros::param::get(param_name, comm_link_edge_hold_sec)) {
+    comm_link_edge_hold_sec = 0.8;
+    ROSPARAM_WARN(param_name, comm_link_edge_hold_sec);
+  }
+  comm_link_edge_hold_sec = std::max(0.0, comm_link_edge_hold_sec);
+
+  param_name = ns + "/comm_link_fallback_distance_if_inconclusive";
+  if (!ros::param::get(param_name, comm_link_fallback_distance_if_inconclusive)) {
+    comm_link_fallback_distance_if_inconclusive = true;
+    ROSPARAM_WARN(param_name, comm_link_fallback_distance_if_inconclusive);
+  }
+
+  param_name = ns + "/comm_link_viz_enable";
+  if (!ros::param::get(param_name, comm_link_viz_enable)) {
+    comm_link_viz_enable = true;
+    ROSPARAM_WARN(param_name, comm_link_viz_enable);
+  }
+
   ROSPARAM_INFO("Done.");
   return true;
 }

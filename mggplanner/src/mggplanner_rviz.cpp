@@ -65,7 +65,61 @@ Visualization::Visualization(const ros::NodeHandle& nh,
       nh_.advertise<visualization_msgs::MarkerArray>("vis/alternate_path", 10);
   comm_return_target_pub_ = nh_.advertise<visualization_msgs::MarkerArray>(
       "vis/comm_return_target", 10);
+  comm_team_links_pub_ = nh_.advertise<visualization_msgs::MarkerArray>(
+      "vis/comm_team_links", 10);
   best_path_id_ = 0;
+}
+
+void Visualization::visualizeCommTeamLinks(
+    uint32_t robot_id, const std::vector<CommTeamLinkViz>& links,
+    double min_snr_db_for_color) {
+  visualization_msgs::MarkerArray ma;
+  visualization_msgs::Marker lines;
+  lines.header.frame_id = world_frame_id;
+  lines.header.stamp = ros::Time::now();
+  lines.ns = "comm_team_links";
+  lines.id = static_cast<int>(robot_id);
+  lines.type = visualization_msgs::Marker::LINE_LIST;
+  lines.action = visualization_msgs::Marker::ADD;
+  lines.scale.x = 0.06;
+  lines.pose.orientation.w = 1.0;
+  lines.lifetime = ros::Duration(0.6);
+  lines.frame_locked = false;
+
+  for (const CommTeamLinkViz& L : links) {
+    geometry_msgs::Point a;
+    a.x = L.p.x();
+    a.y = L.p.y();
+    a.z = L.p.z();
+    geometry_msgs::Point b;
+    b.x = L.q.x();
+    b.y = L.q.y();
+    b.z = L.q.z();
+    lines.points.push_back(a);
+    lines.points.push_back(b);
+    std_msgs::ColorRGBA ca, cb;
+    if (!L.edge_ok) {
+      ca.r = cb.r = 0.95f;
+      ca.g = cb.g = 0.15f;
+      ca.b = cb.b = 0.15f;
+    } else {
+      const double span = 25.0;
+      float t = static_cast<float>(
+          (L.snr_db - min_snr_db_for_color) / span);
+      if (t < 0.0f) t = 0.0f;
+      if (t > 1.0f) t = 1.0f;
+      float red = 0.0f, green = 0.0f, blue = 0.0f;
+      getHeatMapColor(1.0f - t, red, green, blue);
+      ca.r = cb.r = red;
+      ca.g = cb.g = green;
+      ca.b = cb.b = blue;
+    }
+    ca.a = cb.a = 0.95f;
+    lines.colors.push_back(ca);
+    lines.colors.push_back(cb);
+  }
+  ma.markers.push_back(lines);
+  comm_team_links_pub_.publish(ma);
 }
 
 void Visualization::visualizeCommReturnTarget(const StateVec& state,

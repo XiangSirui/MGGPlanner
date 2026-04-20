@@ -1,5 +1,7 @@
 #include "mggplanner/rrg.h"
 
+#include "mggplanner/comm_link_model.h"
+
 #include <algorithm>
 #include <ctime>
 
@@ -27,6 +29,12 @@
 namespace explorer {
 
 namespace {
+uint64_t makeUndirectedEdgeKey(const size_t i, const size_t j) {
+  const uint64_t a = static_cast<uint64_t>(std::min(i, j));
+  const uint64_t b = static_cast<uint64_t>(std::max(i, j));
+  return (a << 32) | b;
+}
+
 bool ensureParentDirsForFile(const std::string& filepath) {
   for (size_t i = 1; i < filepath.size(); ++i) {
     if (filepath[i] == '/') {
@@ -105,6 +113,9 @@ void Rrg::initializeAttributes() {
   last_state_marker_global_ << 0, 0, 0, 0;
   comm_boundary_state_ << 0, 0, 0, 0;
   comm_return_target_state_ << 0, 0, 0, 0;
+  last_comm_team_links_viz_stamp_ = ros::Time(0);
+  comm_edge_prev_state_.clear();
+  comm_edge_last_change_stamp_.clear();
   robot_backtracking_prev_ = NULL;
 
   planner_trigger_mode_ = PlannerTriggerModeType::kManual;
@@ -183,6 +194,8 @@ void Rrg::initializeAttributes() {
 
 void Rrg::reset() {
   ROS_INFO_COND(global_verbosity >= Verbosity::INFO, "Reset: RRG");
+  comm_edge_prev_state_.clear();
+  comm_edge_last_change_stamp_.clear();
   // Check if the local graph frontiers have been added to the global graph
   if (add_frontiers_to_global_graph_) {
     ROS_INFO_COND(global_verbosity >= Verbosity::INFO, "Reset: Adding frontiers to global graph");
@@ -3290,12 +3303,13 @@ bool Rrg::loadParams(bool shared_params) {
       mode_str = "strict";
       rrg_comm_note =
           "RRG rejects new vertices that would make the team graph disconnected "
-          "(pairwise range <= comm_max_range_m)";
+          "(pairwise links: map-coupled rays+SNR within comm_max_range_m when "
+          "comm_link_model_enable and map ready; else distance-only)";
     } else if (planning_params_.comm_topology_mode == CommTopologyMode::kRelay) {
       mode_str = "relay";
       rrg_comm_note =
-          "RRG does NOT filter expansion for comm — disconnection handled only in "
-          "relay state / homing / markers, not in satisfyCommunicationConstraint";
+          "RRG does NOT filter expansion for comm — team connected/disconnected "
+          "uses the same pairwise link model as strict (map-coupled when enabled)";
     }
     ROS_WARN(
         "[R%u][CommunicationConstraint] EFFECTIVE comm_topology_mode=%s | %s | "
@@ -3552,6 +3566,18 @@ bool Rrg::isTeamCommunicationConnected(const StateVec& self_state) {
 
   const double range = planning_params_.comm_max_range_m;
   std::vector<std::vector<int>> adj(n);
+  const bool collect_viz =
+      planning_params_.comm_link_viz_enable && visualization_ != NULL;
+  const ros::Time now = ros::Time::now();
+  const bool do_viz_publish =
+      collect_viz &&
+      ((now - last_comm_team_links_viz_stamp_).toSec() >= 0.5 ||
+       last_comm_team_links_viz_stamp_.isZero());
+  std::vector<CommTeamLinkViz> team_links;
+  if (do_viz_publish) {
+    team_links.reserve(n * (n - 1) / 2);
+  }
+
   for (size_t i = 0; i < n; ++i) {
     for (size_t j = i + 1; j < n; ++j) {
       const double dx = pos[i].x() - pos[j].x();
@@ -3561,11 +3587,78 @@ bool Rrg::isTeamCommunicationConnected(const StateVec& self_state) {
         const double dz = pos[i].z() - pos[j].z();
         dist = std::sqrt(dx * dx + dy * dy + dz * dz);
       }
-      if (dist <= range) {
+      CommLinkRayFanMetrics met{};
+      bool connected = false;
+      if (map_manager_) {
+        connected = commLinkEdgeStrict(*map_manager_, planning_params_, pos[i],
+                                       pos[j], range, comm_constraint_use_2d_,
+                                       &met);
+      } else {
+        connected = (dist <= range);
+      }
+
+      const uint64_t edge_key = makeUndirectedEdgeKey(i, j);
+      auto prev_it = comm_edge_prev_state_.find(edge_key);
+      const bool has_prev = (prev_it != comm_edge_prev_state_.end());
+      bool prev_state = connected;
+      if (has_prev) {
+        prev_state = prev_it->second;
+      }
+
+      // Two-sided hysteresis around SNR and blocked-ratio thresholds.
+      if (map_manager_ && planning_params_.comm_link_model_enable && met.map_ready &&
+          !met.inconclusive) {
+        const double snr_h = planning_params_.comm_link_snr_hysteresis_db;
+        const double blocked_h =
+            planning_params_.comm_link_blocked_ratio_hysteresis;
+        const double snr_enter = planning_params_.comm_link_min_snr_db + snr_h;
+        const double snr_exit = planning_params_.comm_link_min_snr_db - snr_h;
+        const double blocked_enter = std::max(
+            0.0, planning_params_.comm_link_max_blocked_ratio - blocked_h);
+        const double blocked_exit = std::min(
+            1.0, planning_params_.comm_link_max_blocked_ratio + blocked_h);
+        if (prev_state) {
+          connected =
+              (met.snr_db >= snr_exit) && (met.blocked_ratio <= blocked_exit);
+        } else {
+          connected =
+              (met.snr_db >= snr_enter) && (met.blocked_ratio <= blocked_enter);
+        }
+      }
+
+      // Minimum dwell time before accepting edge-state toggles.
+      const double hold_sec = planning_params_.comm_link_edge_hold_sec;
+      if (has_prev && connected != prev_state && hold_sec > 1e-6) {
+        const ros::Time last = comm_edge_last_change_stamp_[edge_key];
+        if (!last.isZero() && (now - last).toSec() < hold_sec) {
+          connected = prev_state;
+        }
+      }
+
+      if (!has_prev || connected != prev_state) {
+        comm_edge_last_change_stamp_[edge_key] = now;
+      }
+      comm_edge_prev_state_[edge_key] = connected;
+
+      if (connected) {
         adj[i].push_back(static_cast<int>(j));
         adj[j].push_back(static_cast<int>(i));
       }
+      if (do_viz_publish) {
+        CommTeamLinkViz v;
+        v.p = pos[i];
+        v.q = pos[j];
+        v.snr_db = map_manager_ ? met.snr_db : 0.0;
+        v.edge_ok = connected;
+        team_links.push_back(v);
+      }
     }
+  }
+
+  if (do_viz_publish && !team_links.empty()) {
+    visualization_->visualizeCommTeamLinks(
+        robot_id_, team_links, planning_params_.comm_link_min_snr_db);
+    last_comm_team_links_viz_stamp_ = now;
   }
 
   std::vector<bool> vis(n, false);
@@ -5792,8 +5885,9 @@ void Rrg::setState(StateVec& state) {
   odometry_ready = true;
   if (commRelayTopology()) {
     // Freeze return pose when the *team* stops being globally connected (pairwise
-    // graph within comm_max_range_m is disconnected), e.g. R3 isolated but R1–R2
-    // still close — both R1 and R2 trigger on the same transition.
+    // link graph within comm_max_range_m is disconnected — map-coupled when
+    // comm_link_model_enable and map ready), e.g. R3 isolated but R1–R2 still
+    // close — both R1 and R2 trigger on the same transition.
     const bool team_connected = isTeamCommunicationConnected(current_state_);
     if (team_connected) {
       comm_is_out_of_range_ = false;

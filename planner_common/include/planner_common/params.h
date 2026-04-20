@@ -387,6 +387,48 @@ struct PlanningParams {
   // Minimum floor when using reserve mode (see comm_relay_return_reserve_percent).
   double comm_relay_homing_arrival_min_percent;
 
+  /**
+   * When true (default): pairwise team links use MapManager multi-ray
+   * getRayStatus + path loss / SNR (all comm_topology_mode values that use the
+   * team graph: relay disconnect detection, strict sampling, etc.). When false:
+   * legacy geometric edge if distance <= comm_max_range_m (map ignored).
+   */
+  bool comm_link_model_enable;
+  /** Number of rays in the fan (including the central LOS ray). */
+  int comm_link_ray_count;
+  /** Half-angle of the ray fan around the peer direction (rad). */
+  double comm_link_ray_half_angle_rad;
+  /** Reference path loss at d0 (dB). */
+  double comm_link_pl0_db;
+  /** Path-loss exponent when link is mostly LOS (free rays). */
+  double comm_link_path_loss_exp_los;
+  /** Path-loss exponent under NLOS (blocked / unknown-heavy) conditions. */
+  double comm_link_path_loss_exp_nlos;
+  /** Reference distance d0 for log-distance model (m). */
+  double comm_link_d0_m;
+  /** Extra loss (dB) scaled by unknown_ray_ratio along the fan. */
+  double comm_link_unknown_penalty_db;
+  /** If true, ray casting stops at first unknown voxel (more conservative). */
+  bool comm_link_ray_stop_at_unknown;
+  /** Equivalent TX power for SNR budget (dBm). */
+  double comm_link_ptx_dbm;
+  /** Noise floor for SNR (dBm). */
+  double comm_link_noise_floor_dbm;
+  /** Minimum SNR (dB) required for an edge to exist. */
+  double comm_link_min_snr_db;
+  /** Schmitt-trigger half-band around min_snr_db to reduce edge flapping. */
+  double comm_link_snr_hysteresis_db;
+  /** Edge rejected if fraction of rays hitting occupied exceeds this (0–1). */
+  double comm_link_max_blocked_ratio;
+  /** Schmitt-trigger half-band around max_blocked_ratio to reduce flapping. */
+  double comm_link_blocked_ratio_hysteresis;
+  /** Minimum hold time (s) before accepting edge state transitions. */
+  double comm_link_edge_hold_sec;
+  /** If map not ready or rays inconclusive, fall back to legacy distance edge. */
+  bool comm_link_fallback_distance_if_inconclusive;
+  /** Publish RViz markers for team links (throttled inside planner). */
+  bool comm_link_viz_enable;
+
   bool loadParams(std::string ns);
   void setPlanningMode(PlanningModeType pmode);
 };

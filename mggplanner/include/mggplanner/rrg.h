@@ -306,6 +306,11 @@ class Rrg {
   std::vector<std::string> comm_constraint_peer_frames_;
   // TF frame for peer/self distance (default "world" to match Gazebo p3d / ground_truth).
   std::string comm_distance_ref_frame_ = "world";
+  /** Throttle RViz comm link segments in isTeamCommunicationConnected. */
+  ros::Time last_comm_team_links_viz_stamp_;
+  /** Pair-edge hysteresis memory to avoid threshold flapping. */
+  std::unordered_map<uint64_t, bool> comm_edge_prev_state_;
+  std::unordered_map<uint64_t, ros::Time> comm_edge_last_change_stamp_;
   bool comm_disconnect_marker_enable_ = true;
   // Empty: use visualization_tools/log[/session]. Non-empty: that directory only.
   std::string comm_event_log_dir_;

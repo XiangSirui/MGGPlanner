@@ -19,6 +19,7 @@ include_directories(
 cs_add_library(
   ${PROJECT_NAME}
   src/mggplanner.cpp
+  src/comm_link_model.cpp
   src/rrg.cpp
   src/mggplanner_rviz.cpp
 )
