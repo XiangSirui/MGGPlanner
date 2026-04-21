@@ -1433,6 +1433,168 @@ bool PlanningParams::loadParams(std::string ns) {
     ROSPARAM_WARN(param_name, comm_link_viz_enable);
   }
 
+  param_name = ns + "/peer_collision_avoidance_enable";
+  if (!ros::param::get(param_name, peer_collision_avoidance_enable)) {
+    peer_collision_avoidance_enable = true;
+    ROSPARAM_WARN(param_name, peer_collision_avoidance_enable);
+  }
+
+  param_name = ns + "/peer_collision_min_distance_m";
+  if (!ros::param::get(param_name, peer_collision_min_distance_m)) {
+    peer_collision_min_distance_m = 1.2;
+    ROSPARAM_WARN(param_name, peer_collision_min_distance_m);
+  }
+  peer_collision_min_distance_m = std::max(0.1, peer_collision_min_distance_m);
+
+  param_name = ns + "/peer_collision_segment_buffer_m";
+  if (!ros::param::get(param_name, peer_collision_segment_buffer_m)) {
+    peer_collision_segment_buffer_m = 0.3;
+    ROSPARAM_WARN(param_name, peer_collision_segment_buffer_m);
+  }
+  peer_collision_segment_buffer_m =
+      std::max(0.0, peer_collision_segment_buffer_m);
+
+  param_name = ns + "/role_assignment_enable";
+  if (!ros::param::get(param_name, role_assignment_enable)) {
+    role_assignment_enable = false;
+    ROSPARAM_WARN(param_name, role_assignment_enable);
+  }
+
+  param_name = ns + "/role_update_period_sec";
+  if (!ros::param::get(param_name, role_update_period_sec)) {
+    role_update_period_sec = 1.0;
+    ROSPARAM_WARN(param_name, role_update_period_sec);
+  }
+  role_update_period_sec = std::max(0.1, role_update_period_sec);
+
+  param_name = ns + "/role_feature_timeout_sec";
+  if (!ros::param::get(param_name, role_feature_timeout_sec)) {
+    role_feature_timeout_sec = 4.0;
+    ROSPARAM_WARN(param_name, role_feature_timeout_sec);
+  }
+  role_feature_timeout_sec = std::max(0.5, role_feature_timeout_sec);
+
+  param_name = ns + "/role_trigger_margin_percent";
+  if (!ros::param::get(param_name, role_trigger_margin_percent)) {
+    role_trigger_margin_percent = 8.0;
+    ROSPARAM_WARN(param_name, role_trigger_margin_percent);
+  }
+
+  param_name = ns + "/role_lock_margin_percent";
+  if (!ros::param::get(param_name, role_lock_margin_percent)) {
+    role_lock_margin_percent = 5.0;
+    ROSPARAM_WARN(param_name, role_lock_margin_percent);
+  }
+
+  param_name = ns + "/role_energy_reserve_percent";
+  if (!ros::param::get(param_name, role_energy_reserve_percent)) {
+    role_energy_reserve_percent = 10.0;
+    ROSPARAM_WARN(param_name, role_energy_reserve_percent);
+  }
+  role_energy_reserve_percent =
+      std::max(0.0, std::min(95.0, role_energy_reserve_percent));
+
+  param_name = ns + "/role_switch_hysteresis";
+  if (!ros::param::get(param_name, role_switch_hysteresis)) {
+    role_switch_hysteresis = 0.08;
+    ROSPARAM_WARN(param_name, role_switch_hysteresis);
+  }
+  role_switch_hysteresis = std::max(0.0, role_switch_hysteresis);
+
+  param_name = ns + "/role_hold_sec";
+  if (!ros::param::get(param_name, role_hold_sec)) {
+    role_hold_sec = 30.0;
+    ROSPARAM_WARN(param_name, role_hold_sec);
+  }
+  role_hold_sec = std::max(0.0, role_hold_sec);
+
+  param_name = ns + "/role_weight_margin";
+  if (!ros::param::get(param_name, role_weight_margin)) {
+    role_weight_margin = 0.45;
+    ROSPARAM_WARN(param_name, role_weight_margin);
+  }
+
+  param_name = ns + "/role_weight_home_distance";
+  if (!ros::param::get(param_name, role_weight_home_distance)) {
+    role_weight_home_distance = 0.20;
+    ROSPARAM_WARN(param_name, role_weight_home_distance);
+  }
+
+  param_name = ns + "/role_weight_comm_risk";
+  if (!ros::param::get(param_name, role_weight_comm_risk)) {
+    role_weight_comm_risk = 0.25;
+    ROSPARAM_WARN(param_name, role_weight_comm_risk);
+  }
+
+  param_name = ns + "/role_weight_fail_risk";
+  if (!ros::param::get(param_name, role_weight_fail_risk)) {
+    role_weight_fail_risk = 0.10;
+    ROSPARAM_WARN(param_name, role_weight_fail_risk);
+  }
+
+  param_name = ns + "/role_mobility_check_enable";
+  if (!ros::param::get(param_name, role_mobility_check_enable)) {
+    role_mobility_check_enable = true;
+    ROSPARAM_WARN(param_name, role_mobility_check_enable);
+  }
+
+  param_name = ns + "/role_mobility_hard_exclusion_enable";
+  if (!ros::param::get(param_name, role_mobility_hard_exclusion_enable)) {
+    role_mobility_hard_exclusion_enable = true;
+    ROSPARAM_WARN(param_name, role_mobility_hard_exclusion_enable);
+  }
+
+  param_name = ns + "/mobility_fall_tilt_deg";
+  if (!ros::param::get(param_name, mobility_fall_tilt_deg)) {
+    mobility_fall_tilt_deg = 45.0;
+    ROSPARAM_WARN(param_name, mobility_fall_tilt_deg);
+  }
+  mobility_fall_tilt_deg = std::max(5.0, mobility_fall_tilt_deg);
+
+  param_name = ns + "/mobility_recover_tilt_deg";
+  if (!ros::param::get(param_name, mobility_recover_tilt_deg)) {
+    mobility_recover_tilt_deg = 30.0;
+    ROSPARAM_WARN(param_name, mobility_recover_tilt_deg);
+  }
+  mobility_recover_tilt_deg =
+      std::max(1.0, std::min(mobility_fall_tilt_deg, mobility_recover_tilt_deg));
+
+  param_name = ns + "/mobility_fall_hold_sec";
+  if (!ros::param::get(param_name, mobility_fall_hold_sec)) {
+    mobility_fall_hold_sec = 10.0;
+    ROSPARAM_WARN(param_name, mobility_fall_hold_sec);
+  }
+  mobility_fall_hold_sec = std::max(0.1, mobility_fall_hold_sec);
+
+  param_name = ns + "/mobility_stuck_cmd_speed_mps";
+  if (!ros::param::get(param_name, mobility_stuck_cmd_speed_mps)) {
+    mobility_stuck_cmd_speed_mps = 0.2;
+    ROSPARAM_WARN(param_name, mobility_stuck_cmd_speed_mps);
+  }
+  mobility_stuck_cmd_speed_mps = std::max(0.0, mobility_stuck_cmd_speed_mps);
+
+  param_name = ns + "/mobility_stuck_odom_speed_mps";
+  if (!ros::param::get(param_name, mobility_stuck_odom_speed_mps)) {
+    mobility_stuck_odom_speed_mps = 0.03;
+    ROSPARAM_WARN(param_name, mobility_stuck_odom_speed_mps);
+  }
+  mobility_stuck_odom_speed_mps =
+      std::max(0.0, mobility_stuck_odom_speed_mps);
+
+  param_name = ns + "/mobility_stuck_hold_sec";
+  if (!ros::param::get(param_name, mobility_stuck_hold_sec)) {
+    mobility_stuck_hold_sec = 10.0;
+    ROSPARAM_WARN(param_name, mobility_stuck_hold_sec);
+  }
+  mobility_stuck_hold_sec = std::max(0.1, mobility_stuck_hold_sec);
+
+  param_name = ns + "/mobility_recover_hold_sec";
+  if (!ros::param::get(param_name, mobility_recover_hold_sec)) {
+    mobility_recover_hold_sec = 10.0;
+    ROSPARAM_WARN(param_name, mobility_recover_hold_sec);
+  }
+  mobility_recover_hold_sec = std::max(0.1, mobility_recover_hold_sec);
+
   ROSPARAM_INFO("Done.");
   return true;
 }

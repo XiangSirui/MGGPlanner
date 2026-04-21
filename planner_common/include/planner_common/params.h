@@ -428,6 +428,44 @@ struct PlanningParams {
   bool comm_link_fallback_distance_if_inconclusive;
   /** Publish RViz markers for team links (throttled inside planner). */
   bool comm_link_viz_enable;
+  // Dynamic peer collision avoidance in planning graph expansion.
+  bool peer_collision_avoidance_enable;
+  // Minimum allowed distance to other robots (meters).
+  double peer_collision_min_distance_m;
+  // Extra buffer for edge-vs-peer checks (meters).
+  double peer_collision_segment_buffer_m;
+
+  // Role assignment: one carrier returns to home, others return to boundary.
+  bool role_assignment_enable;
+  double role_update_period_sec;
+  double role_feature_timeout_sec;
+  double role_trigger_margin_percent;
+  double role_lock_margin_percent;
+  double role_energy_reserve_percent;
+  double role_switch_hysteresis;
+  double role_hold_sec;
+  double role_weight_margin;
+  double role_weight_home_distance;
+  double role_weight_comm_risk;
+  double role_weight_fail_risk;
+  // Mobility-aware role assignment (tilt + stuck heuristics).
+  bool role_mobility_check_enable;
+  // If true, fallen robots are excluded from carrier candidates.
+  bool role_mobility_hard_exclusion_enable;
+  // Tilt threshold for FALLEN state.
+  double mobility_fall_tilt_deg;
+  // Tilt threshold used for recovery to NORMAL.
+  double mobility_recover_tilt_deg;
+  // Seconds tilt must persist to mark FALLEN.
+  double mobility_fall_hold_sec;
+  // Minimum cmd speed to consider "robot is commanded to move".
+  double mobility_stuck_cmd_speed_mps;
+  // Maximum odom speed considered "not moving".
+  double mobility_stuck_odom_speed_mps;
+  // Seconds command/no-progress must persist to mark STUCK.
+  double mobility_stuck_hold_sec;
+  // Recovery dwell time back to NORMAL from STUCK/FALLEN.
+  double mobility_recover_hold_sec;
 
   bool loadParams(std::string ns);
   void setPlanningMode(PlanningModeType pmode);

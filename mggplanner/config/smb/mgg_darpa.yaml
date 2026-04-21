@@ -208,6 +208,31 @@ PlanningParams:
   comm_link_edge_hold_sec: 0.8
   comm_link_fallback_distance_if_inconclusive: true
   comm_link_viz_enable: true
+  peer_collision_avoidance_enable: true
+  peer_collision_min_distance_m: 1.2
+  peer_collision_segment_buffer_m: 0.3
+  # Role assignment: single carrier returns to home; others return to boundary.
+  role_assignment_enable: true
+  role_update_period_sec: 1.0
+  role_feature_timeout_sec: 4.0
+  role_trigger_margin_percent: 8.0
+  role_lock_margin_percent: 5.0
+  role_energy_reserve_percent: 10.0
+  role_switch_hysteresis: 0.08
+  role_hold_sec: 30.0
+  role_weight_margin: 0.45
+  role_weight_home_distance: 0.20
+  role_weight_comm_risk: 0.25
+  role_weight_fail_risk: 0.10
+  role_mobility_check_enable: true
+  role_mobility_hard_exclusion_enable: true
+  mobility_fall_tilt_deg: 45.0
+  mobility_recover_tilt_deg: 30.0
+  mobility_fall_hold_sec: 10.0
+  mobility_stuck_cmd_speed_mps: 0.2
+  mobility_stuck_odom_speed_mps: 0.03
+  mobility_stuck_hold_sec: 10.0
+  mobility_recover_hold_sec: 10.0
 
 AdaptiveObbParams:
   type: kPca

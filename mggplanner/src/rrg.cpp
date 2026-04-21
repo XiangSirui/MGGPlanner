@@ -166,6 +166,10 @@ void Rrg::initializeAttributes() {
   battery_remaining_percent_subscriber_ =
       nh_.subscribe("battery_remaining_percent", 10,
                     &Rrg::batteryRemainingPercentCallback, this);
+  imu_subscriber_ =
+      nh_.subscribe("imu/data", 20, &Rrg::imuCallback, this);
+  cmd_vel_subscriber_ =
+      nh_.subscribe("cmd_vel", 20, &Rrg::cmdVelCallback, this);
 
   nh_private_.param<std::string>("gcaa_bids_topic", gcaa_bids_topic_,
                                  std::string("/gcaa_bids"));
@@ -173,11 +177,15 @@ void Rrg::initializeAttributes() {
       nh_.advertise<planner_msgs::GcaaBidPacket>(gcaa_bids_topic_, 10);
   gcaa_bid_subscriber_ =
       nh_.subscribe(gcaa_bids_topic_, 50, &Rrg::gcaaBidCallback, this);
+  role_feature_subscriber_ =
+      nh_.subscribe("/role_features", 100, &Rrg::roleFeatureCallback, this);
 
   time_log_pub_ =
       nh_.advertise<std_msgs::Float32MultiArray>("gbp_time_log", 10);
   exploration_load_scale_pub_ =
       nh_.advertise<std_msgs::Float32>("exploration_load_scale", 10, true);
+  role_feature_pub_ =
+      nh_.advertise<std_msgs::Float32MultiArray>("/role_features", 20);
   {
     std_msgs::Float32 m0;
     m0.data = 1.0f;
@@ -501,11 +509,391 @@ void Rrg::batteryRemainingPercentCallback(const std_msgs::Float32& msg) {
   battery_remaining_percent_ = msg.data;
 }
 
+void Rrg::imuCallback(const sensor_msgs::Imu::ConstPtr& msg) {
+  if (msg.get() == NULL) return;
+  tf::Quaternion q;
+  tf::quaternionMsgToTF(msg->orientation, q);
+  double roll = 0.0, pitch = 0.0, yaw = 0.0;
+  tf::Matrix3x3(q).getRPY(roll, pitch, yaw);
+  mobility_roll_deg_ = std::abs(roll) * 180.0 / M_PI;
+  mobility_pitch_deg_ = std::abs(pitch) * 180.0 / M_PI;
+  mobility_imu_ready_ = true;
+}
+
+void Rrg::cmdVelCallback(const geometry_msgs::Twist::ConstPtr& msg) {
+  if (msg.get() == NULL) return;
+  mobility_cmd_speed_mps_ =
+      std::sqrt(msg->linear.x * msg->linear.x + msg->linear.y * msg->linear.y +
+                msg->linear.z * msg->linear.z);
+}
+
+void Rrg::updateMobilityState(const StateVec& state) {
+  if (!planning_params_.role_mobility_check_enable) {
+    mobility_state_ = MobilityState::kNormal;
+    mobility_fallen_accum_sec_ = 0.0;
+    mobility_stuck_accum_sec_ = 0.0;
+    mobility_recover_accum_sec_ = 0.0;
+    return;
+  }
+
+  const ros::Time now = ros::Time::now();
+  const Eigen::Vector3d cur_pos(state[0], state[1], state[2]);
+  if (mobility_last_state_stamp_.toSec() <= 0.0) {
+    mobility_last_state_stamp_ = now;
+    mobility_last_state_pos_ = cur_pos;
+    mobility_odom_speed_mps_ = 0.0;
+    return;
+  }
+  const double dt = std::max(1e-3, (now - mobility_last_state_stamp_).toSec());
+  mobility_odom_speed_mps_ = (cur_pos - mobility_last_state_pos_).norm() / dt;
+  mobility_last_state_stamp_ = now;
+  mobility_last_state_pos_ = cur_pos;
+
+  if (!mobility_imu_ready_) {
+    // Without IMU, only the stuck branch can trigger.
+    mobility_roll_deg_ = 0.0;
+    mobility_pitch_deg_ = 0.0;
+  }
+
+  const bool tilt_fallen =
+      (mobility_roll_deg_ > planning_params_.mobility_fall_tilt_deg) ||
+      (mobility_pitch_deg_ > planning_params_.mobility_fall_tilt_deg);
+  const bool stuck_cond =
+      (mobility_cmd_speed_mps_ > planning_params_.mobility_stuck_cmd_speed_mps) &&
+      (mobility_odom_speed_mps_ < planning_params_.mobility_stuck_odom_speed_mps);
+
+  mobility_fallen_accum_sec_ = tilt_fallen ? (mobility_fallen_accum_sec_ + dt) : 0.0;
+  mobility_stuck_accum_sec_ = stuck_cond ? (mobility_stuck_accum_sec_ + dt) : 0.0;
+
+  MobilityState next_state = MobilityState::kNormal;
+  if (mobility_fallen_accum_sec_ >= planning_params_.mobility_fall_hold_sec) {
+    next_state = MobilityState::kFallen;
+  } else if (mobility_stuck_accum_sec_ >= planning_params_.mobility_stuck_hold_sec) {
+    next_state = MobilityState::kStuck;
+  }
+
+  if (next_state != MobilityState::kNormal) {
+    mobility_recover_accum_sec_ = 0.0;
+    mobility_state_ = next_state;
+    return;
+  }
+
+  if (mobility_state_ != MobilityState::kNormal) {
+    const bool tilt_recovered =
+        (mobility_roll_deg_ < planning_params_.mobility_recover_tilt_deg) &&
+        (mobility_pitch_deg_ < planning_params_.mobility_recover_tilt_deg);
+    const bool motion_recovered =
+        (mobility_odom_speed_mps_ > planning_params_.mobility_stuck_odom_speed_mps) ||
+        (mobility_cmd_speed_mps_ < planning_params_.mobility_stuck_cmd_speed_mps);
+    if (tilt_recovered && motion_recovered) {
+      mobility_recover_accum_sec_ += dt;
+      if (mobility_recover_accum_sec_ >= planning_params_.mobility_recover_hold_sec) {
+        mobility_state_ = MobilityState::kNormal;
+        mobility_fallen_accum_sec_ = 0.0;
+        mobility_stuck_accum_sec_ = 0.0;
+        mobility_recover_accum_sec_ = 0.0;
+      }
+    } else {
+      mobility_recover_accum_sec_ = 0.0;
+    }
+  }
+}
+
 void Rrg::publishExplorationLoadScale(float scale) {
   std_msgs::Float32 m;
   m.data = static_cast<float>(
       std::max(0.0, std::min(1.0, static_cast<double>(scale))));
   exploration_load_scale_pub_.publish(m);
+}
+
+std::vector<Eigen::Vector3d> Rrg::getPeerPositionsInWorld() const {
+  std::vector<Eigen::Vector3d> peers;
+  if (!planning_params_.peer_collision_avoidance_enable) return peers;
+  if (listener_ == NULL) return peers;
+  for (const auto& frame : comm_constraint_peer_frames_) {
+    if (frame == self_base_frame_) continue;
+    tf::StampedTransform peer_tf;
+    try {
+      listener_->lookupTransform(world_frame_, frame, ros::Time(0), peer_tf);
+      peers.emplace_back(peer_tf.getOrigin().x(), peer_tf.getOrigin().y(),
+                         peer_tf.getOrigin().z());
+    } catch (tf::TransformException&) {
+      // Ignore missing peers to avoid over-conservative planner stalls.
+    }
+  }
+  return peers;
+}
+
+bool Rrg::isStateSafeFromPeers(const Eigen::Vector3d& pos) const {
+  if (!planning_params_.peer_collision_avoidance_enable) return true;
+  const double dmin = planning_params_.peer_collision_min_distance_m;
+  const std::vector<Eigen::Vector3d> peers = getPeerPositionsInWorld();
+  for (const auto& p : peers) {
+    if ((pos - p).norm() < dmin) return false;
+  }
+  return true;
+}
+
+bool Rrg::isEdgeSafeFromPeers(const Eigen::Vector3d& p0,
+                              const Eigen::Vector3d& p1) const {
+  if (!planning_params_.peer_collision_avoidance_enable) return true;
+  const double dmin = planning_params_.peer_collision_min_distance_m +
+                      planning_params_.peer_collision_segment_buffer_m;
+  const std::vector<Eigen::Vector3d> peers = getPeerPositionsInWorld();
+  const Eigen::Vector3d seg = p1 - p0;
+  const double seg_len2 = seg.squaredNorm();
+  for (const auto& p : peers) {
+    double t = 0.0;
+    if (seg_len2 > 1e-9) {
+      t = (p - p0).dot(seg) / seg_len2;
+      t = std::max(0.0, std::min(1.0, t));
+    }
+    const Eigen::Vector3d proj = p0 + t * seg;
+    if ((p - proj).norm() < dmin) return false;
+  }
+  return true;
+}
+
+double Rrg::estimateHomeDistanceMeters() const {
+  if (!odometry_ready || global_graph_ == NULL || global_graph_->getNumVertices() == 0) {
+    return 0.0;
+  }
+  const StateVec& home = global_graph_->getVertex(0)->state;
+  const Eigen::Vector3d cur(current_state_[0], current_state_[1], current_state_[2]);
+  const Eigen::Vector3d h(home[0], home[1], home[2]);
+  return (cur - h).norm();
+}
+
+double Rrg::estimateBoundaryDistanceMeters() const {
+  if (!odometry_ready) return 0.0;
+  const StateVec* target = nullptr;
+  if (comm_return_target_valid_) {
+    target = &comm_return_target_state_;
+  } else if (comm_boundary_state_valid_) {
+    target = &comm_boundary_state_;
+  }
+  if (target == nullptr) {
+    return estimateHomeDistanceMeters();
+  }
+  const Eigen::Vector3d cur(current_state_[0], current_state_[1], current_state_[2]);
+  const Eigen::Vector3d b((*target)[0], (*target)[1], (*target)[2]);
+  return (cur - b).norm();
+}
+
+double Rrg::estimateCommRiskScalar() const {
+  if (!commTopologyEnabled()) return 0.0;
+  if (commRelayTopology()) {
+    return comm_is_out_of_range_ ? 1.0 : 0.0;
+  }
+  return role_team_connected_ ? 0.0 : 1.0;
+}
+
+void Rrg::publishRoleFeature() {
+  if (!planning_params_.role_assignment_enable || !odometry_ready) return;
+  const ros::Time now = ros::Time::now();
+  if (role_last_publish_stamp_.toSec() > 0.0 &&
+      (now - role_last_publish_stamp_).toSec() <
+          planning_params_.role_update_period_sec) {
+    return;
+  }
+  role_last_publish_stamp_ = now;
+
+  const double home_distance = estimateHomeDistanceMeters();
+  const double boundary_distance = estimateBoundaryDistanceMeters();
+  const double full_dist =
+      std::max(1.0, planning_params_.battery_equivalent_full_distance_m);
+  const double ratio = std::max(0.1, planning_params_.battery_homing_energy_cost_ratio);
+  const double reserve = std::max(0.0, planning_params_.role_energy_reserve_percent);
+  const double home_cost = 100.0 * ratio * (home_distance / full_dist);
+  const double boundary_cost = 100.0 * ratio * (boundary_distance / full_dist);
+  const double home_margin = battery_remaining_percent_ - home_cost - reserve;
+  const double boundary_margin =
+      battery_remaining_percent_ - boundary_cost - reserve;
+  const double comm_risk = estimateCommRiskScalar();
+  const bool mobility_ok = (mobility_state_ != MobilityState::kFallen);
+  double fail_risk = 0.0;
+  if (mobility_state_ == MobilityState::kStuck) {
+    fail_risk = 0.7;
+  } else if (mobility_state_ == MobilityState::kFallen) {
+    fail_risk = 1.0;
+  }
+
+  RoleFeaturePacket self;
+  self.robot_id = static_cast<int>(robot_id_);
+  self.battery_percent = battery_remaining_percent_;
+  self.home_distance_m = home_distance;
+  self.boundary_distance_m = boundary_distance;
+  self.comm_risk = comm_risk;
+  self.home_margin_percent = home_margin;
+  self.boundary_margin_percent = boundary_margin;
+  self.mobility_ok = mobility_ok;
+  self.fail_risk = fail_risk;
+  self.mobility_state = static_cast<int>(mobility_state_);
+  self.stamp = now;
+  role_feature_map_[self.robot_id] = self;
+
+  std_msgs::Float32MultiArray msg;
+  // [robot_id, battery, home_dist, boundary_dist, comm_risk, home_margin,
+  //  boundary_margin, stamp_sec, mobility_ok, fail_risk, mobility_state]
+  msg.data.resize(11);
+  msg.data[0] = static_cast<float>(self.robot_id);
+  msg.data[1] = static_cast<float>(self.battery_percent);
+  msg.data[2] = static_cast<float>(self.home_distance_m);
+  msg.data[3] = static_cast<float>(self.boundary_distance_m);
+  msg.data[4] = static_cast<float>(self.comm_risk);
+  msg.data[5] = static_cast<float>(self.home_margin_percent);
+  msg.data[6] = static_cast<float>(self.boundary_margin_percent);
+  msg.data[7] = static_cast<float>(self.stamp.toSec());
+  msg.data[8] = self.mobility_ok ? 1.0f : 0.0f;
+  msg.data[9] = static_cast<float>(self.fail_risk);
+  msg.data[10] = static_cast<float>(self.mobility_state);
+  role_feature_pub_.publish(msg);
+}
+
+void Rrg::roleFeatureCallback(
+    const std_msgs::Float32MultiArray::ConstPtr& msg) {
+  if (!planning_params_.role_assignment_enable) return;
+  if (msg.get() == NULL || msg->data.size() < 8) return;
+  RoleFeaturePacket p;
+  p.robot_id = static_cast<int>(std::round(msg->data[0]));
+  if (p.robot_id <= 0) return;
+  p.battery_percent = msg->data[1];
+  p.home_distance_m = msg->data[2];
+  p.boundary_distance_m = msg->data[3];
+  p.comm_risk = std::max(0.0, std::min(1.0, static_cast<double>(msg->data[4])));
+  p.home_margin_percent = msg->data[5];
+  p.boundary_margin_percent = msg->data[6];
+  p.stamp = ros::Time(msg->data[7]);
+  if (msg->data.size() >= 11) {
+    p.mobility_ok = msg->data[8] > 0.5;
+    p.fail_risk = std::max(0.0, std::min(1.0, static_cast<double>(msg->data[9])));
+    p.mobility_state = static_cast<int>(std::round(msg->data[10]));
+  } else {
+    p.mobility_ok = true;
+    p.fail_risk = 0.0;
+    p.mobility_state = static_cast<int>(MobilityState::kNormal);
+  }
+  role_feature_map_[p.robot_id] = p;
+}
+
+void Rrg::updateRoleAssignment() {
+  if (!planning_params_.role_assignment_enable) return;
+  const ros::Time now = ros::Time::now();
+  if (role_last_assign_stamp_.toSec() > 0.0 &&
+      (now - role_last_assign_stamp_).toSec() <
+          planning_params_.role_update_period_sec) {
+    return;
+  }
+  role_last_assign_stamp_ = now;
+
+  std::vector<RoleFeaturePacket> candidates;
+  candidates.reserve(role_feature_map_.size());
+  const double timeout = planning_params_.role_feature_timeout_sec;
+  for (const auto& kv : role_feature_map_) {
+    const RoleFeaturePacket& p = kv.second;
+    if ((now - p.stamp).toSec() > timeout) continue;
+    candidates.push_back(p);
+  }
+  if (candidates.empty()) return;
+
+  double min_m = std::numeric_limits<double>::infinity();
+  double max_m = -std::numeric_limits<double>::infinity();
+  double min_d = std::numeric_limits<double>::infinity();
+  double max_d = -std::numeric_limits<double>::infinity();
+  for (const auto& c : candidates) {
+    min_m = std::min(min_m, c.home_margin_percent);
+    max_m = std::max(max_m, c.home_margin_percent);
+    min_d = std::min(min_d, c.home_distance_m);
+    max_d = std::max(max_d, c.home_distance_m);
+  }
+  const double dm = std::max(1e-3, max_m - min_m);
+  const double dd = std::max(1e-3, max_d - min_d);
+
+  const double lock_margin = planning_params_.role_lock_margin_percent;
+  const double w1 = planning_params_.role_weight_margin;
+  const double w2 = planning_params_.role_weight_home_distance;
+  const double w4 = planning_params_.role_weight_fail_risk;
+  int best_robot = -1;
+  double best_cost = std::numeric_limits<double>::infinity();
+  bool best_robot_found = false;
+  bool current_carrier_unavailable = false;
+  if (role_assigned_ && role_carrier_id_ > 0) {
+    auto old_it = role_feature_map_.find(role_carrier_id_);
+    if (old_it != role_feature_map_.end()) {
+      const RoleFeaturePacket& old = old_it->second;
+      const bool stale = (now - old.stamp).toSec() > timeout;
+      current_carrier_unavailable =
+          stale || (planning_params_.role_mobility_hard_exclusion_enable &&
+                    !old.mobility_ok);
+    }
+  }
+  for (const auto& c : candidates) {
+    if (planning_params_.role_mobility_hard_exclusion_enable && !c.mobility_ok) {
+      continue;
+    }
+    if (c.home_margin_percent < lock_margin) continue;
+    const double margin_norm = (c.home_margin_percent - min_m) / dm;
+    const double dist_norm = (c.home_distance_m - min_d) / dd;
+    const double fail_risk = std::max(0.0, std::min(1.0, c.fail_risk));
+    const double cost =
+        w1 * (1.0 - margin_norm) + w2 * dist_norm + w4 * fail_risk;
+    if (cost < best_cost || (std::abs(cost - best_cost) < 1e-6 &&
+                             c.robot_id < best_robot)) {
+      best_cost = cost;
+      best_robot = c.robot_id;
+      best_robot_found = true;
+    }
+  }
+  if (!best_robot_found) {
+    double best_margin = -std::numeric_limits<double>::infinity();
+    for (const auto& c : candidates) {
+      if (planning_params_.role_mobility_hard_exclusion_enable && !c.mobility_ok) {
+        continue;
+      }
+      if (c.home_margin_percent > best_margin ||
+          (std::abs(c.home_margin_percent - best_margin) < 1e-6 &&
+           c.robot_id < best_robot)) {
+        best_margin = c.home_margin_percent;
+        best_robot = c.robot_id;
+      }
+    }
+  }
+  if (best_robot < 0) return;
+
+  if (!current_carrier_unavailable && role_assigned_ && role_carrier_id_ != best_robot &&
+      role_last_lock_stamp_.toSec() > 0.0 &&
+      (now - role_last_lock_stamp_).toSec() < planning_params_.role_hold_sec) {
+    return;
+  }
+  if (role_assigned_ && role_carrier_id_ > 0 && role_carrier_id_ != best_robot) {
+    auto old_it = role_feature_map_.find(role_carrier_id_);
+    if (old_it != role_feature_map_.end()) {
+      const RoleFeaturePacket& old = old_it->second;
+      const double old_margin_norm = (old.home_margin_percent - min_m) / dm;
+      const double old_dist_norm = (old.home_distance_m - min_d) / dd;
+      const double old_fail_risk = std::max(0.0, std::min(1.0, old.fail_risk));
+      const double old_cost =
+          w1 * (1.0 - old_margin_norm) + w2 * old_dist_norm + w4 * old_fail_risk;
+      if (best_cost > old_cost - planning_params_.role_switch_hysteresis) {
+        best_robot = role_carrier_id_;
+      }
+    }
+  }
+
+  if (!role_assigned_ || role_carrier_id_ != best_robot) {
+    role_carrier_id_ = best_robot;
+    role_assigned_ = true;
+    role_last_lock_stamp_ = now;
+    ROS_WARN_COND(
+        global_verbosity >= Verbosity::WARN,
+        "[RoleAssign] carrier=R%d (self=R%u) | formula: J=w1*(1-Mn)+w2*Dn+w4*Fr",
+        role_carrier_id_, robot_id_);
+    if (visualization_ != NULL) {
+      visualization_->visualizeRoleAssignment(
+          current_state_, robot_id_, role_assigned_, role_carrier_id_,
+          isCarrierRole());
+    }
+  }
 }
 
 bool Rrg::sampleVertex(Vertex& vertex) {
@@ -557,8 +945,14 @@ bool Rrg::sampleVertex(Vertex& vertex) {
             Eigen::Vector3d(state[0], state[1], state[2]) +
                 robot_params_.center_offset,
             robot_box_size_, true)) {
-      random_sampler_.pushSample(state, true);  // for debug purpose.
-      found = true;
+      const Eigen::Vector3d state_pos(state[0], state[1], state[2]);
+      if (isStateSafeFromPeers(state_pos)) {
+        random_sampler_.pushSample(state, true);  // for debug purpose.
+        found = true;
+      } else {
+        stat_->num_vertices_fail++;
+        random_sampler_.pushSample(state, false);
+      }
     } else {
       stat_->num_vertices_fail++;
       random_sampler_.pushSample(state, false);
@@ -606,8 +1000,14 @@ bool Rrg::sampleVertex(RandomSampler& random_sampler, StateVec& root_state,
             Eigen::Vector3d(state[0], state[1], state[2]) +
                 robot_params_.center_offset,
             robot_box_size_, true)) {
-      random_sampler.pushSample(state, true);  // for debug purpose.
-      found = true;
+      const Eigen::Vector3d state_pos(state[0], state[1], state[2]);
+      if (isStateSafeFromPeers(state_pos)) {
+        random_sampler.pushSample(state, true);  // for debug purpose.
+        found = true;
+      } else {
+        stat_->num_vertices_fail++;
+        random_sampler.pushSample(state, false);
+      }
     } else {
       stat_->num_vertices_fail++;
       random_sampler.pushSample(state, false);
@@ -907,6 +1307,9 @@ void Rrg::expandGraph(std::shared_ptr<GraphManager> graph_manager,
   if (admissible_edge && !satisfyCommunicationConstraint(new_state)) {
     admissible_edge = false;
   }
+  if (admissible_edge && !isEdgeSafeFromPeers(start_pos, end_pos)) {
+    admissible_edge = false;
+  }
   if (admissible_edge) {
     Vertex* new_vertex =
         new Vertex(graph_manager->generateVertexID(), new_state);
@@ -992,6 +1395,9 @@ void Rrg::expandGraph(std::shared_ptr<GraphManager> graph_manager,
               } else if (ProjectedEdgeStatus::kSteep == es)
                 ++steep_edges;
             }
+            if (admissible_edge && !isEdgeSafeFromPeers(p_start, p_end)) {
+              admissible_edge = false;
+            }
             if (admissible_edge) {
               graph_manager->addEdge(new_vertex, nearest_vertices[i], d_norm);
               ++rep.num_edges_added;
@@ -1060,6 +1466,9 @@ void Rrg::expandGraphEdges(std::shared_ptr<GraphManager> graph_manager,
         }
       }
 
+      if (admissible_edge && !isEdgeSafeFromPeers(p_start, p_end)) {
+        admissible_edge = false;
+      }
       if (admissible_edge) {
         graph_manager->addEdge(new_vertex, nearest_vertices[i], d_norm);
         ++rep.num_edges_added;
@@ -1198,6 +1607,9 @@ void Rrg::expandGraph(std::shared_ptr<GraphManager> graph_manager,
   if (admissible_edge && !satisfyCommunicationConstraint(new_state)) {
     admissible_edge = false;
   }
+  if (admissible_edge && !isEdgeSafeFromPeers(start_pos, end_pos)) {
+    admissible_edge = false;
+  }
   if (admissible_edge) {
     Vertex* new_vertex_ptr =
         new Vertex(graph_manager->generateVertexID(), new_state);
@@ -1311,6 +1723,9 @@ void Rrg::expandGraph(std::shared_ptr<GraphManager> graph_manager,
                 ++steep_edges;
             }
 
+            if (admissible_edge && !isEdgeSafeFromPeers(p_start, p_end)) {
+              admissible_edge = false;
+            }
             if (admissible_edge) {
               if (local_exploration_ongoing_) {
                 double max_inclination = 0.0;
@@ -4788,13 +5203,6 @@ std::vector<geometry_msgs::Pose> Rrg::getGlobalPath(
 
 std::vector<geometry_msgs::Pose> Rrg::getHomingPath(std::string tgt_frame) {
   std::vector<geometry_msgs::Pose> ret_path;
-  const bool comm_skip_auto_homing =
-      commRelayTopology() && !comm_ever_disconnected_;
-  if (comm_skip_auto_homing) {
-    ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
-                  "[CommunicationConstraint] always connected: homing skipped.");
-    return ret_path;
-  }
   const bool use_comm_boundary_as_target =
       commRelayTopology() && comm_boundary_state_valid_ &&
       comm_ever_disconnected_;
@@ -5027,11 +5435,16 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
       return homing_path;
     }
     // Relay mode: if we never left comm range, skip auto homing.
-    const bool comm_skip_auto_homing =
-        commRelayTopology() && !comm_ever_disconnected_;
+    const bool role_non_carrier =
+        planning_params_.role_assignment_enable && role_assigned_ &&
+        !isCarrierRole();
+    const bool role_boundary_only =
+        role_non_carrier &&
+        (comm_boundary_state_valid_ || comm_return_target_valid_);
     const bool use_comm_boundary_as_target =
-        commRelayTopology() && comm_boundary_state_valid_ &&
-        comm_ever_disconnected_;
+        (commRelayTopology() && comm_boundary_state_valid_ &&
+         comm_ever_disconnected_) ||
+        role_boundary_only;
     const bool use_comm_boundary_battery_threshold =
         use_comm_boundary_as_target && comm_is_out_of_range_;
 
@@ -5083,24 +5496,18 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
         planning_params_.battery_percent_homing_enable &&
         battery_remaining_percent_ <=
             battery_homing_threshold + kBatteryCriticalEps;
-    if (comm_skip_auto_homing && battery_at_or_below_critical) {
-      ROS_WARN_THROTTLE(
-          5.0,
-          "[Homing] R%u: battery %.2f%% at/below critical %.2f%% (eps=%.2f) — "
-          "auto homing skipped (relay + team never disconnected).",
-          robot_id_, battery_remaining_percent_, battery_homing_threshold,
-          kBatteryCriticalEps);
-    }
-    if (!comm_skip_auto_homing && battery_at_or_below_critical) {
+    if (battery_at_or_below_critical) {
       ROS_WARN_COND(
           global_verbosity >= Verbosity::PLANNER_STATUS,
           "BATTERY CRITICAL: %.2f%% at/below computed budget %.2f%% (eps=%.2f) "
-          "path_len=%.2fm dynamic=%d --> %s.",
+          "path_len=%.2fm dynamic=%d role=%s carrier=R%d --> %s.",
           battery_remaining_percent_,
           battery_homing_threshold,
           kBatteryCriticalEps,
           preview_len_m,
           planning_params_.battery_homing_dynamic_threshold_enable ? 1 : 0,
+          role_non_carrier ? "NON_CARRIER" : "CARRIER_OR_NONE",
+          role_carrier_id_,
           use_comm_boundary_as_target ? "COMM-BOUNDARY HOMING" : "HOMING");
       homing_path = homing_path_preview;
       if (homing_path.empty()) {
@@ -5148,58 +5555,56 @@ std::vector<geometry_msgs::Pose> Rrg::getBestPath(std::string tgt_frame,
           static_cast<float>(homing_exploration_load_scale_));
       return homing_path;
     }
-    if (!comm_skip_auto_homing) {
-      // Check two conditions whatever which one comes first.
-      double time_remaining =
-          std::min(time_budget_remaining, current_battery_time_remaining_);
-      homing_path = homing_path_preview;
-      if (!homing_path.empty()) {
-      double homing_len = Trajectory::getPathLength(homing_path);
-      double time_to_home = homing_len / planning_params_.v_homing_max;
-      ROS_INFO_COND(global_verbosity >= Verbosity::INFO, "Time to home: %f; Time remaining: %f", time_to_home,
-               time_remaining);
+    // Check two conditions whatever which one comes first.
+    double time_remaining =
+        std::min(time_budget_remaining, current_battery_time_remaining_);
+    homing_path = homing_path_preview;
+    if (!homing_path.empty()) {
+    double homing_len = Trajectory::getPathLength(homing_path);
+    double time_to_home = homing_len / planning_params_.v_homing_max;
+    ROS_INFO_COND(global_verbosity >= Verbosity::INFO, "Time to home: %f; Time remaining: %f", time_to_home,
+             time_remaining);
 
-        const double kTimeDelta = 20;
-        if (time_to_home > time_remaining - kTimeDelta) {
-          ROS_WARN_COND(global_verbosity >= Verbosity::PLANNER_STATUS, "REACHED TIME LIMIT: HOMING ENGAGED.");
-          if (!use_comm_boundary_as_target &&
-              planning_params_.path_safety_enhance_enable) {
-            std::vector<geometry_msgs::Pose> mod_path;
-            if (improveFreePath(homing_path, mod_path, true)) {
-              homing_path = mod_path;
-            }
+      const double kTimeDelta = 20;
+      if (time_to_home > time_remaining - kTimeDelta) {
+        ROS_WARN_COND(global_verbosity >= Verbosity::PLANNER_STATUS, "REACHED TIME LIMIT: HOMING ENGAGED.");
+        if (!use_comm_boundary_as_target &&
+            planning_params_.path_safety_enhance_enable) {
+          std::vector<geometry_msgs::Pose> mod_path;
+          if (improveFreePath(homing_path, mod_path, true)) {
+            homing_path = mod_path;
           }
-
-          if (!use_comm_boundary_as_target) {
-            const double kInterpolationDistance =
-                planning_params_.path_interpolation_distance;
-            std::vector<geometry_msgs::Pose> interp_path;
-            if (Trajectory::interpolatePath(homing_path, kInterpolationDistance,
-                                            interp_path)) {
-              homing_path = interp_path;
-            }
-          }
-
-          visualization_->visualizeRefPath(homing_path);
-          homing_engaged_ = true;
-          publishExplorationLoadScale(
-              static_cast<float>(homing_exploration_load_scale_));
-          return homing_path;
         }
-      } else {
-        std::ostringstream detail;
-        detail << "proactive_time_budget_homing path_empty "
-               << "mode="
-               << (use_comm_boundary_as_target ? "comm_boundary_getGlobalPath"
-                                                 : "searchHomingPath_root")
-               << " time_remaining=" << time_remaining
-               << " global_graph_vertices=" << global_graph_->getNumVertices();
-        writeHomingFailureEvent("proactive_homing_no_path", detail.str());
-        ROS_ERROR(
-            "[Homing] R%u: cannot find a path to return home from here "
-            "(proactive time/budget check).",
-            robot_id_);
+
+        if (!use_comm_boundary_as_target) {
+          const double kInterpolationDistance =
+              planning_params_.path_interpolation_distance;
+          std::vector<geometry_msgs::Pose> interp_path;
+          if (Trajectory::interpolatePath(homing_path, kInterpolationDistance,
+                                          interp_path)) {
+            homing_path = interp_path;
+          }
+        }
+
+        visualization_->visualizeRefPath(homing_path);
+        homing_engaged_ = true;
+        publishExplorationLoadScale(
+            static_cast<float>(homing_exploration_load_scale_));
+        return homing_path;
       }
+    } else {
+      std::ostringstream detail;
+      detail << "proactive_time_budget_homing path_empty "
+             << "mode="
+             << (use_comm_boundary_as_target ? "comm_boundary_getGlobalPath"
+                                               : "searchHomingPath_root")
+             << " time_remaining=" << time_remaining
+             << " global_graph_vertices=" << global_graph_->getNumVertices();
+      writeHomingFailureEvent("proactive_homing_no_path", detail.str());
+      ROS_ERROR(
+          "[Homing] R%u: cannot find a path to return home from here "
+          "(proactive time/budget check).",
+          robot_id_);
     }
   }
 
@@ -5882,13 +6287,18 @@ void Rrg::setState(StateVec& state) {
     map_manager_->resetMap();
   }
   current_state_ = state;
+  updateMobilityState(current_state_);
   odometry_ready = true;
+  if (!commTopologyEnabled()) {
+    role_team_connected_ = true;
+  }
   if (commRelayTopology()) {
     // Freeze return pose when the *team* stops being globally connected (pairwise
     // link graph within comm_max_range_m is disconnected — map-coupled when
     // comm_link_model_enable and map ready), e.g. R3 isolated but R1–R2 still
     // close — both R1 and R2 trigger on the same transition.
     const bool team_connected = isTeamCommunicationConnected(current_state_);
+    role_team_connected_ = team_connected;
     if (team_connected) {
       comm_is_out_of_range_ = false;
       // Full team connected again: clear latch so the next disconnect can record
@@ -5962,6 +6372,15 @@ void Rrg::setState(StateVec& state) {
     robot_backtracking_queue_.emplace(current_state_);
   } else {
     robot_backtracking_queue_.emplace(state);
+  }
+  if (planning_params_.role_assignment_enable) {
+    publishRoleFeature();
+    updateRoleAssignment();
+    if (visualization_ != NULL) {
+      visualization_->visualizeRoleAssignment(
+          current_state_, robot_id_, role_assigned_, role_carrier_id_,
+          isCarrierRole());
+    }
   }
 }
 
@@ -6490,31 +6909,27 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
     ROS_INFO_COND(global_verbosity >= Verbosity::INFO, "No frontier exists");
     // Keep exploring or go home if no more frontiers
     if (planning_params_.go_home_if_fully_explored) {
-      const bool comm_skip_auto_homing =
-          commRelayTopology() && !comm_ever_disconnected_;
-      if (comm_skip_auto_homing) {
-        ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
-                      "[CommunicationConstraint] always connected: skip "
-                      "go_home_if_fully_explored homing.");
-        num_low_gain_iters_ = 0;
+      ROS_WARN_COND(global_verbosity >= Verbosity::WARN, " --> Calling HOMING instead.");
+      const bool role_non_carrier =
+          planning_params_.role_assignment_enable && role_assigned_ &&
+          !isCarrierRole();
+      const bool use_comm_boundary_as_target =
+          (commRelayTopology() && comm_boundary_state_valid_ &&
+           comm_ever_disconnected_) ||
+          (role_non_carrier &&
+           (comm_boundary_state_valid_ || comm_return_target_valid_));
+      if (use_comm_boundary_as_target) {
+        geometry_msgs::PoseStamped boundary_waypoint;
+        boundary_waypoint.header.stamp = ros::Time::now();
+        boundary_waypoint.header.frame_id = world_frame_;
+        fillCommReturnWaypoint(boundary_waypoint.pose);
+        ret_path = getGlobalPath(boundary_waypoint);
       } else {
-        ROS_WARN_COND(global_verbosity >= Verbosity::WARN, " --> Calling HOMING instead.");
-        const bool use_comm_boundary_as_target =
-            commRelayTopology() && comm_boundary_state_valid_ &&
-            comm_ever_disconnected_;
-        if (use_comm_boundary_as_target) {
-          geometry_msgs::PoseStamped boundary_waypoint;
-          boundary_waypoint.header.stamp = ros::Time::now();
-          boundary_waypoint.header.frame_id = world_frame_;
-          fillCommReturnWaypoint(boundary_waypoint.pose);
-          ret_path = getGlobalPath(boundary_waypoint);
-        } else {
-          ret_path = getHomingPath(world_frame_);
-        }
-        homing_engaged_ = true;
-        publishExplorationLoadScale(
-            static_cast<float>(homing_exploration_load_scale_));
+        ret_path = getHomingPath(world_frame_);
       }
+      homing_engaged_ = true;
+      publishExplorationLoadScale(
+          static_cast<float>(homing_exploration_load_scale_));
     } else {
       num_low_gain_iters_ = 0;
     }

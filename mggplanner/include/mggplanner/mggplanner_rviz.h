@@ -96,6 +96,9 @@ class Visualization {
   void visualizeCommTeamLinks(uint32_t robot_id,
                               const std::vector<CommTeamLinkViz>& links,
                               double min_snr_db_for_color);
+  void visualizeRoleAssignment(const StateVec& state, uint32_t robot_id,
+                               bool role_assigned, int carrier_id,
+                               bool is_carrier);
   // Visualize global planner paths. Path from current location to best frontier
   // and frontier to home location
   void visualizeGlobalPaths(const std::shared_ptr<GraphManager> graph_manager,
@@ -153,6 +156,7 @@ class Visualization {
   ros::Publisher path_pub_;
   ros::Publisher comm_return_target_pub_;
   ros::Publisher comm_team_links_pub_;
+  ros::Publisher role_assignment_pub_;
 
   std::string world_frame_id = "world";
   // 0 = infinite

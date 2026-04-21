@@ -67,6 +67,8 @@ Visualization::Visualization(const ros::NodeHandle& nh,
       "vis/comm_return_target", 10);
   comm_team_links_pub_ = nh_.advertise<visualization_msgs::MarkerArray>(
       "vis/comm_team_links", 10);
+  role_assignment_pub_ = nh_.advertise<visualization_msgs::MarkerArray>(
+      "vis/role_assignment", 10);
   best_path_id_ = 0;
 }
 
@@ -120,6 +122,78 @@ void Visualization::visualizeCommTeamLinks(
   }
   ma.markers.push_back(lines);
   comm_team_links_pub_.publish(ma);
+}
+
+void Visualization::visualizeRoleAssignment(const StateVec& state,
+                                            uint32_t robot_id,
+                                            bool role_assigned, int carrier_id,
+                                            bool is_carrier) {
+  if (role_assignment_pub_.getNumSubscribers() < 1) return;
+
+  visualization_msgs::MarkerArray ma;
+
+  visualization_msgs::Marker dot;
+  dot.header.stamp = ros::Time::now();
+  dot.header.frame_id = world_frame_id;
+  dot.ns = "role_assignment_dot";
+  dot.id = static_cast<int>(robot_id);
+  dot.action = visualization_msgs::Marker::ADD;
+  dot.type = visualization_msgs::Marker::SPHERE;
+  dot.pose.position.x = state[0];
+  dot.pose.position.y = state[1];
+  dot.pose.position.z = state[2] + 0.6;
+  dot.pose.orientation.w = 1.0;
+  dot.scale.x = 0.45;
+  dot.scale.y = 0.45;
+  dot.scale.z = 0.45;
+  if (!role_assigned) {
+    dot.color.r = 0.8;
+    dot.color.g = 0.8;
+    dot.color.b = 0.8;
+  } else if (is_carrier) {
+    dot.color.r = 0.1;
+    dot.color.g = 0.9;
+    dot.color.b = 0.1;
+  } else {
+    dot.color.r = 0.1;
+    dot.color.g = 0.4;
+    dot.color.b = 1.0;
+  }
+  dot.color.a = 0.95;
+  dot.lifetime = ros::Duration(1.5);
+  ma.markers.push_back(dot);
+
+  visualization_msgs::Marker txt;
+  txt.header = dot.header;
+  txt.ns = "role_assignment_text";
+  txt.id = 1000 + static_cast<int>(robot_id);
+  txt.action = visualization_msgs::Marker::ADD;
+  txt.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+  txt.pose.position.x = state[0];
+  txt.pose.position.y = state[1];
+  txt.pose.position.z = state[2] + 1.05;
+  txt.pose.orientation.w = 1.0;
+  txt.scale.z = 0.42;
+  txt.color.r = 1.0;
+  txt.color.g = 1.0;
+  txt.color.b = 1.0;
+  txt.color.a = 1.0;
+  txt.lifetime = ros::Duration(1.5);
+  std::ostringstream oss;
+  if (!role_assigned) {
+    oss << "R" << robot_id << " role=UNASSIGNED";
+  } else if (is_carrier) {
+    oss << "R" << robot_id << " role=CARRIER";
+  } else {
+    oss << "R" << robot_id << " role=BOUNDARY";
+  }
+  if (carrier_id > 0) {
+    oss << " | carrier=R" << carrier_id;
+  }
+  txt.text = oss.str();
+  ma.markers.push_back(txt);
+
+  role_assignment_pub_.publish(ma);
 }
 
 void Visualization::visualizeCommReturnTarget(const StateVec& state,

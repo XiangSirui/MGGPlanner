@@ -28,6 +28,8 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl_ros/point_cloud.h>
 #include <pcl_ros/transforms.h>
+#include <geometry_msgs/Twist.h>
+#include <sensor_msgs/Imu.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <std_msgs/Bool.h>
 #include <std_msgs/Float32.h>
@@ -299,6 +301,38 @@ class Rrg {
   std::string commEventLogSessionDirectory() const;
   void writeHomingFailureEvent(const std::string& event_name,
                                const std::string& detail);
+  struct RoleFeaturePacket {
+    int robot_id = -1;
+    double battery_percent = 0.0;
+    double home_distance_m = 0.0;
+    double boundary_distance_m = 0.0;
+    double comm_risk = 0.0;
+    double home_margin_percent = -1e9;
+    double boundary_margin_percent = -1e9;
+    bool mobility_ok = true;
+    double fail_risk = 0.0;
+    int mobility_state = 0;
+    ros::Time stamp;
+  };
+  enum class MobilityState {
+    kNormal = 0,
+    kStuck = 1,
+    kFallen = 2,
+  };
+  void publishRoleFeature();
+  void roleFeatureCallback(const std_msgs::Float32MultiArray::ConstPtr& msg);
+  void updateRoleAssignment();
+  void imuCallback(const sensor_msgs::Imu::ConstPtr& msg);
+  void cmdVelCallback(const geometry_msgs::Twist::ConstPtr& msg);
+  void updateMobilityState(const StateVec& state);
+  double estimateHomeDistanceMeters() const;
+  double estimateBoundaryDistanceMeters() const;
+  double estimateCommRiskScalar() const;
+  std::vector<Eigen::Vector3d> getPeerPositionsInWorld() const;
+  bool isStateSafeFromPeers(const Eigen::Vector3d& pos) const;
+  bool isEdgeSafeFromPeers(const Eigen::Vector3d& p0,
+                           const Eigen::Vector3d& p1) const;
+  bool isCarrierRole() const { return role_assigned_ && role_carrier_id_ == static_cast<int>(robot_id_); }
 
   std::string world_frame_ = "world";
   std::string self_base_frame_ = "";
@@ -340,6 +374,24 @@ class Rrg {
   bool comm_relay_disconnect_latched_ = false;
   // One marker file per disconnect episode; cleared when team reconnects.
   bool comm_disconnect_marker_file_written_ = false;
+  bool role_team_connected_ = true;
+  std::unordered_map<int, RoleFeaturePacket> role_feature_map_;
+  ros::Time role_last_publish_stamp_;
+  ros::Time role_last_assign_stamp_;
+  ros::Time role_last_lock_stamp_;
+  int role_carrier_id_ = -1;
+  bool role_assigned_ = false;
+  bool mobility_imu_ready_ = false;
+  double mobility_roll_deg_ = 0.0;
+  double mobility_pitch_deg_ = 0.0;
+  double mobility_cmd_speed_mps_ = 0.0;
+  double mobility_odom_speed_mps_ = 0.0;
+  ros::Time mobility_last_state_stamp_;
+  Eigen::Vector3d mobility_last_state_pos_ = Eigen::Vector3d::Zero();
+  double mobility_fallen_accum_sec_ = 0.0;
+  double mobility_stuck_accum_sec_ = 0.0;
+  double mobility_recover_accum_sec_ = 0.0;
+  MobilityState mobility_state_ = MobilityState::kNormal;
 
   std::string gcaa_bids_topic_;
   std::mutex gcaa_bid_mutex_;
@@ -361,12 +413,16 @@ class Rrg {
   ros::Publisher auction_frontier_markers_pub_;
   ros::Publisher gcaa_bid_pub_;
   ros::Publisher exploration_load_scale_pub_;
+  ros::Publisher role_feature_pub_;
 
   ros::Subscriber semantics_subscriber_;
   ros::Subscriber stop_srv_subscriber_;
   ros::Subscriber neighbour_graph_subscriber_;
   ros::Subscriber battery_remaining_percent_subscriber_;
+  ros::Subscriber imu_subscriber_;
+  ros::Subscriber cmd_vel_subscriber_;
   ros::Subscriber gcaa_bid_subscriber_;
+  ros::Subscriber role_feature_subscriber_;
 
   ros::ServiceClient pci_homing_;
   ros::ServiceClient landing_srv_client_;
