@@ -70,6 +70,7 @@ install(DIRECTORY launch/
 install(PROGRAMS scripts/realTimePlot.py scripts/inter_robot_distances.py
     scripts/global_explored_volume.py
     scripts/record_exploration_metrics.py
+    scripts/auto_start_planner.py
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/scripts
 )
 

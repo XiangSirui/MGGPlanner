@@ -23,7 +23,10 @@ struct CommLinkRayFanMetrics {
   double los_ratio = 0.0;
   double blocked_ratio = 0.0;
   double unknown_ratio = 0.0;
+  /** Mean large-scale loss (dB): PL + obstruction; excludes shadowing_db. */
   double path_loss_db = 0.0;
+  double shadowing_db = 0.0;
+  double noise_floor_dbm = 0.0;
   double snr_db = 0.0;
   /** Map not integrated or all rays inconclusive (e.g. all unknown). */
   bool inconclusive = false;

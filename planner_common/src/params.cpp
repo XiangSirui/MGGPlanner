@@ -1063,6 +1063,13 @@ bool PlanningParams::loadParams(std::string ns) {
     ROSPARAM_WARN(param_name, "std::numeric_limits<double>::max()");
   }
 
+  param_name = ns + "/homing_time_safety_margin_sec";
+  if (!ros::param::get(param_name, homing_time_safety_margin_sec)) {
+    homing_time_safety_margin_sec = 20.0;
+    ROSPARAM_WARN(param_name, homing_time_safety_margin_sec);
+  }
+  homing_time_safety_margin_sec = std::max(0.0, homing_time_safety_margin_sec);
+
   param_name = ns + "/homing_backward";
   if (!ros::param::get(param_name, homing_backward)) {
     homing_backward = false;
@@ -1225,6 +1232,22 @@ bool PlanningParams::loadParams(std::string ns) {
     ROSPARAM_WARN(param_name, auction_frontier_beta);
   }
 
+  param_name = ns + "/global_frontier_distance_penalty";
+  if (!ros::param::get(param_name, global_frontier_distance_penalty)) {
+    global_frontier_distance_penalty = 0.05;
+    ROSPARAM_WARN(param_name, global_frontier_distance_penalty);
+  }
+  global_frontier_distance_penalty =
+      std::max(0.0, global_frontier_distance_penalty);
+
+  param_name = ns + "/global_frontier_other_robot_penalty";
+  if (!ros::param::get(param_name, global_frontier_other_robot_penalty)) {
+    global_frontier_other_robot_penalty = 0.001;
+    ROSPARAM_WARN(param_name, global_frontier_other_robot_penalty);
+  }
+  global_frontier_other_robot_penalty =
+      std::max(0.0, global_frontier_other_robot_penalty);
+
   param_name = ns + "/auction_fallback_to_legacy";
   if (!ros::param::get(param_name, auction_fallback_to_legacy)) {
     auction_fallback_to_legacy = true;
@@ -1242,6 +1265,14 @@ bool PlanningParams::loadParams(std::string ns) {
     independent_planning_enable = false;
     ROSPARAM_WARN(param_name, independent_planning_enable);
   }
+
+  param_name = ns + "/global_graph_connect_radius_limit";
+  if (!ros::param::get(param_name, global_graph_connect_radius_limit)) {
+    global_graph_connect_radius_limit = 1.5;
+    ROSPARAM_WARN(param_name, global_graph_connect_radius_limit);
+  }
+  global_graph_connect_radius_limit =
+      std::max(0.0, global_graph_connect_radius_limit);
 
   param_name = ns + "/gcaa_lite_enable";
   if (!ros::param::get(param_name, gcaa_lite_enable)) {
@@ -1342,6 +1373,32 @@ bool PlanningParams::loadParams(std::string ns) {
     ROSPARAM_WARN(param_name, comm_link_pl0_db);
   }
 
+  param_name = ns + "/comm_link_carrier_freq_hz";
+  if (!ros::param::get(param_name, comm_link_carrier_freq_hz)) {
+    comm_link_carrier_freq_hz = 0.0;
+    ROSPARAM_WARN(param_name, comm_link_carrier_freq_hz);
+  }
+  comm_link_carrier_freq_hz = std::max(0.0, comm_link_carrier_freq_hz);
+
+  param_name = ns + "/comm_link_tx_antenna_gain_dbi";
+  if (!ros::param::get(param_name, comm_link_tx_antenna_gain_dbi)) {
+    comm_link_tx_antenna_gain_dbi = 0.0;
+    ROSPARAM_WARN(param_name, comm_link_tx_antenna_gain_dbi);
+  }
+
+  param_name = ns + "/comm_link_rx_antenna_gain_dbi";
+  if (!ros::param::get(param_name, comm_link_rx_antenna_gain_dbi)) {
+    comm_link_rx_antenna_gain_dbi = 0.0;
+    ROSPARAM_WARN(param_name, comm_link_rx_antenna_gain_dbi);
+  }
+
+  param_name = ns + "/comm_link_misc_system_loss_db";
+  if (!ros::param::get(param_name, comm_link_misc_system_loss_db)) {
+    comm_link_misc_system_loss_db = 0.0;
+    ROSPARAM_WARN(param_name, comm_link_misc_system_loss_db);
+  }
+  comm_link_misc_system_loss_db = std::max(0.0, comm_link_misc_system_loss_db);
+
   param_name = ns + "/comm_link_path_loss_exp_los";
   if (!ros::param::get(param_name, comm_link_path_loss_exp_los)) {
     comm_link_path_loss_exp_los = 2.0;
@@ -1384,6 +1441,35 @@ bool PlanningParams::loadParams(std::string ns) {
     comm_link_noise_floor_dbm = -95.0;
     ROSPARAM_WARN(param_name, comm_link_noise_floor_dbm);
   }
+
+  param_name = ns + "/comm_link_bandwidth_hz";
+  if (!ros::param::get(param_name, comm_link_bandwidth_hz)) {
+    comm_link_bandwidth_hz = 0.0;
+    ROSPARAM_WARN(param_name, comm_link_bandwidth_hz);
+  }
+  comm_link_bandwidth_hz = std::max(0.0, comm_link_bandwidth_hz);
+
+  param_name = ns + "/comm_link_noise_figure_db";
+  if (!ros::param::get(param_name, comm_link_noise_figure_db)) {
+    comm_link_noise_figure_db = 6.0;
+    ROSPARAM_WARN(param_name, comm_link_noise_figure_db);
+  }
+  comm_link_noise_figure_db = std::max(0.0, comm_link_noise_figure_db);
+
+  param_name = ns + "/comm_link_geom_los_obstructed_loss_db";
+  if (!ros::param::get(param_name, comm_link_geom_los_obstructed_loss_db)) {
+    comm_link_geom_los_obstructed_loss_db = 0.0;
+    ROSPARAM_WARN(param_name, comm_link_geom_los_obstructed_loss_db);
+  }
+  comm_link_geom_los_obstructed_loss_db =
+      std::max(0.0, comm_link_geom_los_obstructed_loss_db);
+
+  param_name = ns + "/comm_link_shadowing_std_db";
+  if (!ros::param::get(param_name, comm_link_shadowing_std_db)) {
+    comm_link_shadowing_std_db = 0.0;
+    ROSPARAM_WARN(param_name, comm_link_shadowing_std_db);
+  }
+  comm_link_shadowing_std_db = std::max(0.0, comm_link_shadowing_std_db);
 
   param_name = ns + "/comm_link_min_snr_db";
   if (!ros::param::get(param_name, comm_link_min_snr_db)) {

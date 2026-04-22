@@ -343,6 +343,8 @@ struct PlanningParams {
   /** Added to computed homing SOC cost before comparing to battery_remaining_percent_. */
   double battery_homing_trigger_safety_margin_percent;
   double time_budget_limit;
+  // Extra safety margin (seconds) used by homing/global-feasibility checks.
+  double homing_time_safety_margin_sec;
   bool auto_landing_enable;
   double time_budget_before_landing;
   double max_negative_inclination;
@@ -354,6 +356,9 @@ struct PlanningParams {
   bool auction_frontier_enable;
   double auction_frontier_alpha;
   double auction_frontier_beta;
+  // Legacy global score shaping used when utility/greedy-nearest are disabled.
+  double global_frontier_distance_penalty;
+  double global_frontier_other_robot_penalty;
   bool auction_fallback_to_legacy;
   // If true: global frontier choice uses only graph distance (greedy nearest
   // frontier). Disables multi-robot auction filtering and legacy gain term for
@@ -362,6 +367,8 @@ struct PlanningParams {
   // If true: disable all neighbour global-graph publish/subscribe/merge so each
   // robot plans independently without cross-robot global graph information.
   bool independent_planning_enable;
+  // Radius limit (m) when connecting current state to global graph.
+  double global_graph_connect_radius_limit;
   // If true: enable iterative GCAA-like frontier assignment in auction mode.
   // Default false keeps the previous single-pass auction behavior unchanged.
   bool gcaa_lite_enable;
@@ -394,12 +401,26 @@ struct PlanningParams {
    * legacy geometric edge if distance <= comm_max_range_m (map ignored).
    */
   bool comm_link_model_enable;
-  /** Number of rays in the fan (including the central LOS ray). */
+  /** Number of rays: first is exact geometric LOS, remaining sample the cap. */
   int comm_link_ray_count;
   /** Half-angle of the ray fan around the peer direction (rad). */
   double comm_link_ray_half_angle_rad;
-  /** Reference path loss at d0 (dB). */
+  /**
+   * Reference path loss at d0 (dB). Used directly when
+   * comm_link_carrier_freq_hz <= 0.
+   */
   double comm_link_pl0_db;
+  /**
+   * Carrier frequency (Hz). If > 0, PL0 is computed from Friis free-space loss
+   * at d0: 20*log10(4*pi*d0*f/c) - Gt - Gr + Lmisc.
+   */
+  double comm_link_carrier_freq_hz;
+  /** TX antenna gain Gt (dBi), used only when comm_link_carrier_freq_hz > 0. */
+  double comm_link_tx_antenna_gain_dbi;
+  /** RX antenna gain Gr (dBi), used only when comm_link_carrier_freq_hz > 0. */
+  double comm_link_rx_antenna_gain_dbi;
+  /** Additional system loss Lmisc (dB), used in Friis-derived PL0. */
+  double comm_link_misc_system_loss_db;
   /** Path-loss exponent when link is mostly LOS (free rays). */
   double comm_link_path_loss_exp_los;
   /** Path-loss exponent under NLOS (blocked / unknown-heavy) conditions. */
@@ -414,6 +435,23 @@ struct PlanningParams {
   double comm_link_ptx_dbm;
   /** Noise floor for SNR (dBm). */
   double comm_link_noise_floor_dbm;
+  /**
+   * If > 0: noise power from thermal floor -174 dBm/Hz + 10*log10(bandwidth) +
+   * comm_link_noise_figure_db (replaces comm_link_noise_floor_dbm for SNR).
+   */
+  double comm_link_bandwidth_hz;
+  /** Receiver noise figure (dB); used only when comm_link_bandwidth_hz > 0. */
+  double comm_link_noise_figure_db;
+  /**
+   * Extra large-scale loss (dB) when the geometric LOS segment pi→pj hits an
+   * occupied voxel (penetration / no clear Fresnel tube). 0 disables.
+   */
+  double comm_link_geom_los_obstructed_loss_db;
+  /**
+   * Log-normal shadowing std-dev (dB). Deterministic per link from quantized
+   * endpoints (reproducible). 0 disables.
+   */
+  double comm_link_shadowing_std_db;
   /** Minimum SNR (dB) required for an edge to exist. */
   double comm_link_min_snr_db;
   /** Schmitt-trigger half-band around min_snr_db to reduce edge flapping. */

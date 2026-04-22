@@ -193,7 +193,15 @@ PlanningParams:
   comm_link_model_enable: true
   comm_link_ray_count: 9
   comm_link_ray_half_angle_rad: 0.08726646259971647
+  # PL0 at d0. If carrier frequency below is set (>0), PL0 is auto-derived by Friis.
   comm_link_pl0_db: 40.0
+  # Friis inputs (literature-backed baseline).
+  comm_link_carrier_freq_hz: 2400000000.0
+  comm_link_tx_antenna_gain_dbi: 0.0
+  comm_link_rx_antenna_gain_dbi: 0.0
+  comm_link_misc_system_loss_db: 0.0
+  # Typical ranges from wireless channel literature:
+  # LOS exponent n≈1.8–2.2, NLOS exponent n≈3.0–5.0.
   comm_link_path_loss_exp_los: 2.0
   comm_link_path_loss_exp_nlos: 3.5
   comm_link_d0_m: 1.0
@@ -201,7 +209,15 @@ PlanningParams:
   comm_link_ray_stop_at_unknown: false
   comm_link_ptx_dbm: 20.0
   comm_link_noise_floor_dbm: -95.0
-  comm_link_min_snr_db: 6.0
+  # Thermal noise: N(dBm) = -174 + 10*log10(B) + NF.
+  comm_link_bandwidth_hz: 20000000.0
+  comm_link_noise_figure_db: 6.0
+  # Initial prior, then calibrate from logs: commonly 10–25 dB for blocked LOS.
+  comm_link_geom_los_obstructed_loss_db: 15.0
+  # Log-normal shadowing sigma, typical indoor/subterranean 4–8 dB.
+  comm_link_shadowing_std_db: 6.0
+  # Baseline robust link target; refine by PDR-vs-SNR fitting.
+  comm_link_min_snr_db: 10.0
   comm_link_snr_hysteresis_db: 2.0
   comm_link_max_blocked_ratio: 0.34
   comm_link_blocked_ratio_hysteresis: 0.06

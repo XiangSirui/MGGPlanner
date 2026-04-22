@@ -78,6 +78,13 @@ In Ubuntu 18.04 with ROS Melodic, the gazebo node might crash when running the g
 ## Results
 
 Software Architecture Used During the Deployments
+
+## Communication Model Notes
+
+For the literature-grounded communication/link-budget model and parameter
+references used by the planner, see:
+
+- `COMM_LINK_MODEL_REFERENCES.md`
 ![Soft_arc](docs/img/arc.png)
 
 Deployment Arena 
