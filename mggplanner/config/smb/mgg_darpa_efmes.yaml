@@ -1,0 +1,283 @@
+RobotParams:
+  type:               kGroundRobot
+  size:               [0.8, 0.8, 0.2] # Actual size of the robot in meters [x, y, z]
+  size_extension_min: [0.0, 0.0, 0.0] # minimum extension outside of robot size allowed to operate
+  size_extension:     [0.2, 0.2, 0.2] # maximum extension outside of the robot size
+  center_offset:      [0.0, 0.0, 0.0]
+  relax_ratio:        0.5 # Used to define an intermediate size between size_extension_min and size_extension for planning
+  bound_mode:         kExtendedBound
+  safety_extension:   [2.0, 3.0, 0.2] # Safety extension outside the bounding box of a path segment used to improve it by pushing it away from obstacles
+#-------------------------------------------------------------------------------
+# SENSOR CONFIGURATION
+#  sensor_list: Define a set of sensors relevant to the exploration task.
+#  rotations: ZYX order;
+#             all follows ROS convention (X-forward, Y-left, Z-Up).
+#-------------------------------------------------------------------------------
+SensorParams:
+  sensor_list:      ["VLP16"]
+  VLP16:
+    type:           kLidar
+    max_range:      20.0
+    center_offset:  [0.0, 0.0, 0.0]
+    rotations:      [0.0, 0.0, 0.0]
+    fov:            [rad(2.0*pi), rad(pi/6)]
+    resolution:     [rad(5.0*pi/180), rad(5.0*pi/180)]
+    frontier_percentage_threshold: 0.05
+#-------------------------------------------------------------------------------
+# SAMPLING SPACE CONFIGURATION
+#   Global: Strictly defined bounds for the whole environment.
+#   Local: Define a local space wrt current robot state for planning.
+#-------------------------------------------------------------------------------
+BoundedSpaceParams:
+  Global:
+    type:           kCuboid
+    min_val:        [0.0, -1000.0, -30.0]
+    max_val:        [1000.0, 1000.0, 30.0]
+  Local:
+    type:           kCuboid
+    min_val:        [-15.0, -15.0, -3.0]
+    max_val:        [15.0, 15.0, 3.0]
+    min_extension:  [-20.0, -20.0, -20.0]
+    max_extension:  [20.0, 20.0, 20.0]
+  LocalSearch:
+    type:           kCuboid
+    min_val:        [-50.0, -50.0, -10.0]
+    max_val:        [50.0, 50.0, 10.0]
+  # Adaptive OBB:
+  LocalAdaptiveExp:
+    type:           kCuboid
+    min_val:        [-10.0, -10.0, -0.75]
+    max_val:        [10.0, 10.0, 0.75]
+  GridGraphLocal:
+    type: kCuboid
+    min_val:        [-10.0, -10.0, -1.5]
+    max_val:        [10.0, 10.0, 0.7]
+    min_extension:  [0.5, 0.5, 0.2] # Resolution
+NoGainZones:
+  g1:  # Back
+    type:           kCuboid
+    min_val:        [-50.0, -50.0, -20.0]
+    max_val:        [2.0, 50.0, 20.0]
+#-------------------------------------------------------------------------------
+# SAMPLING POLICY CONFIGURATION
+#   Sample space limited to 4 states: X, Y, Z, and Heading
+#-------------------------------------------------------------------------------
+RandomSamplerParams:
+  SamplerForExploration:
+    X:
+      pdf_type:       kUniform
+      sample_mode:    kLocal
+    Y:
+      pdf_type:       kUniform
+      sample_mode:    kLocal
+    Z:
+      pdf_type:       kUniform
+      sample_mode:    kLocal
+    Heading:
+      pdf_type:       kUniform
+      sample_mode:    kManual
+      min_val:        rad(-pi)
+      max_val:        rad(pi)
+  SamplerForSearching:
+    X:
+      pdf_type:       kUniform
+      sample_mode:    kLocal
+    Y:
+      pdf_type:       kUniform
+      sample_mode:    kLocal
+    Z:
+      pdf_type:       kUniform
+      sample_mode:    kLocal
+    Heading:
+      pdf_type:       kUniform
+      sample_mode:    kManual
+      min_val:        rad(-pi)
+      max_val:        rad(pi)
+  SamplerForAdaptiveExp:
+    X:
+      pdf_type:       kUniform
+      sample_mode:    kLocal
+    Y:
+      pdf_type:       kUniform
+      sample_mode:    kLocal
+    Z:
+      pdf_type:       kUniform
+      sample_mode:    kLocal
+    Heading:
+      pdf_type:       kUniform
+      sample_mode:    kManual
+      min_val:        rad(-pi)
+      max_val:        rad(pi)
+#-------------------------------------------------------------------------------
+# EXPLORATION CONFIGURATION
+# exp_sensor_list: sensors used to compute exploration gain.
+#-------------------------------------------------------------------------------
+PlanningParams:
+  robot_id:           1
+  type:             kAdaptiveExploration # Options: kBasicExploration, kAdaptiveExploration
+  rr_mode:          kGraph
+  bound_mode:       kExtremeBound
+  exp_sensor_list:  ["VLP16"]
+  no_gain_zones_list: ["g1"]
+  edge_length_min:  0.1
+  edge_length_max:  3.0
+  edge_overshoot:   0.0 #m
+  num_vertices_max: 8000 # 500
+  num_edges_max:    50000 # 5000
+  num_loops_cutoff: 2000
+  num_loops_max:    200000
+  nearest_range:    1.0
+  nearest_range_z:  0.21
+  nearest_range_min: 0.1 # >= edge_length_min
+  nearest_range_max: 0.75 # <= edge_length_max
+  use_current_state: true
+  augment_free_voxels_time: 1
+  free_frustum_before_planning: false
+
+  use_ray_model_for_volumetric_gain: true
+  path_length_penalty: 0.07
+  path_direction_penalty: 0.3
+  hanging_vertex_penalty: 5.0
+  exp_gain_voxel_size: 0.8
+  occupied_voxel_gain: 0.0
+  free_voxel_gain:  0.0 #prefer directions towards more free voxels in case of the dead-end
+  unknown_voxel_gain: 60.0
+  nonuniform_ray_cast: true
+  ray_cast_step_size_multiplier: 1.0
+  freespace_cloud_enable: false
+  leafs_only_for_volumetric_gain: false
+  cluster_vertices_for_gain: true
+  clustering_radius: 0.5
+
+  build_grid_local_graph: true
+  
+  max_ground_height: 0.8 # All points will be projected to this height from ground
+  robot_height: 0.6  # Height of robot's base frame from ground
+  max_inclination: rad(25.0*pi/180)
+  interpolate_projection_distance: false
+  
+  yaw_tangent_correction: true
+  traverse_length_max: 6.0
+  traverse_time_max: 40.0
+  path_safety_enhance_enable: true
+  path_interpolation_distance: 0.5
+  
+  auto_global_planner_enable: true
+  relaxed_corridor_multiplier: 1.5
+  homing_backward: false
+  auto_homing_enable: true
+  battery_percent_homing_enable: true
+  # Used only when dynamic homing budget is off or homing path is unavailable.
+  battery_percent_homing_threshold: 50.0
+  battery_homing_dynamic_threshold_enable: true
+  # 100% SOC ~= this many exploration-equivalent meters (match visualization_tools max_battery_distance).
+  battery_equivalent_full_distance_m: 500.0
+  # Homing energy per meter / exploration-equivalent per meter (return leg cheaper than explore).
+  battery_homing_energy_cost_ratio: 0.4
+  # Added to path-derived SOC cost before comparing to remaining SOC (small end margin).
+  battery_homing_trigger_safety_margin_percent: 3.0
+  time_budget_limit: 3600 # 3600 seconds
+  global_frame_id: map
+  global_path_inclination_check: true
+  go_home_if_fully_explored: true
+  geofence_checking_enable: true
+  comm_topology_mode: relay
+  comm_max_range_m: 30.0
+  # Relay SOC floor from last-connected boundary B (not necessarily 0.5*B; tune for policy).
+  # With battery_homing_dynamic_threshold_enable, homing triggers at
+  # max(path_SOC_budget + margin, this floor) while disconnected.
+  comm_relay_battery_fraction: 0.5
+  comm_relay_return_reserve_percent: 0.0
+  comm_relay_homing_arrival_min_percent: 3.0
+  # Pairwise team links (all comm modes that use the graph): map rays + PL/SNR.
+  comm_link_model_enable: true
+  comm_link_ray_count: 9
+  comm_link_ray_half_angle_rad: 0.08726646259971647
+  # PL0 at d0. If carrier frequency below is set (>0), PL0 is auto-derived by Friis.
+  comm_link_pl0_db: 40.0
+  # Friis inputs (literature-backed baseline).
+  comm_link_carrier_freq_hz: 2400000000.0
+  comm_link_tx_antenna_gain_dbi: 0.0
+  comm_link_rx_antenna_gain_dbi: 0.0
+  comm_link_misc_system_loss_db: 0.0
+  # Typical ranges from wireless channel literature:
+  # LOS exponent n≈1.8–2.2, NLOS exponent n≈3.0–5.0.
+  comm_link_path_loss_exp_los: 2.0
+  comm_link_path_loss_exp_nlos: 3.5
+  comm_link_d0_m: 1.0
+  comm_link_unknown_penalty_db: 12.0
+  comm_link_ray_stop_at_unknown: false
+  comm_link_ptx_dbm: 20.0
+  comm_link_noise_floor_dbm: -95.0
+  # Thermal noise: N(dBm) = -174 + 10*log10(B) + NF.
+  comm_link_bandwidth_hz: 20000000.0
+  comm_link_noise_figure_db: 6.0
+  # Initial prior, then calibrate from logs: commonly 10–25 dB for blocked LOS.
+  comm_link_geom_los_obstructed_loss_db: 15.0
+  # Log-normal shadowing sigma, typical indoor/subterranean 4–8 dB.
+  comm_link_shadowing_std_db: 6.0
+  # Baseline robust link target; refine by PDR-vs-SNR fitting.
+  comm_link_min_snr_db: 10.0
+  comm_link_snr_hysteresis_db: 2.0
+  comm_link_max_blocked_ratio: 0.34
+  comm_link_blocked_ratio_hysteresis: 0.06
+  comm_link_edge_hold_sec: 0.8
+  comm_link_fallback_distance_if_inconclusive: true
+  comm_link_viz_enable: true
+  peer_collision_avoidance_enable: true
+  peer_collision_min_distance_m: 1.2
+  peer_collision_segment_buffer_m: 0.3
+  # Role assignment: single carrier returns to home; others return to boundary.
+  role_assignment_enable: true
+  role_update_period_sec: 1.0
+  role_feature_timeout_sec: 4.0
+  role_trigger_margin_percent: 8.0
+  role_lock_margin_percent: 5.0
+  role_energy_reserve_percent: 10.0
+  role_switch_hysteresis: 0.08
+  role_hold_sec: 30.0
+  role_weight_margin: 0.45
+  role_weight_home_distance: 0.20
+  role_weight_comm_risk: 0.25
+  role_weight_fail_risk: 0.10
+  role_mobility_check_enable: true
+  role_mobility_hard_exclusion_enable: true
+  mobility_fall_tilt_deg: 45.0
+  mobility_recover_tilt_deg: 30.0
+  mobility_fall_hold_sec: 10.0
+  mobility_stuck_cmd_speed_mps: 0.2
+  mobility_stuck_odom_speed_mps: 0.03
+  mobility_stuck_hold_sec: 10.0
+  mobility_recover_hold_sec: 10.0
+
+  # --- EFMES (Zuo et al., Meas. Sci. Technol. 36 086316, 2025): connectivity N(b),
+  # P~N(b)/d_path on global graph, repulsion K_rep from v_max; scales exploration score.
+  efmes_frontier_enable: true
+  efmes_cluster_cell_m: 0.8
+  efmes_path_dist_eps: 0.25
+  efmes_d0_rep_m: 8.0
+  efmes_alpha_safe: 1.5
+  efmes_amax: 1.0
+  efmes_k_rep_scale: 1.0
+  efmes_repulsion_weight: 0.12
+  efmes_score_blend: 0.55
+  efmes_min_multiplier: 0.12
+  # DPFP (2604.03042) off for pure EFMES A/B; enable both in a third YAML if desired.
+  dpfp_frontier_prioritization_enable: false
+
+AdaptiveObbParams:
+  type: kPca
+  local_pointcloud_range: 50.0
+  bounding_box_size_max: 35
+
+GeofenceParams:
+  AreaList: ["GLeft", "GBack", "GRight"]
+  GBack:
+    center: [-3.0, 0.0, 0.0]
+    size:   [2.0, 6.0, 0.0]
+  GLeft:
+    center: [0.0, 4.0, 0.0]
+    size:   [6.0, 2.0, 0.0]
+  GRight:
+    center: [0.0, -4.0, 0.0]
+    size:   [6.0, 2.0, 0.0]

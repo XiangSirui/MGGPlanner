@@ -380,6 +380,36 @@ struct PlanningParams {
   double gcaa_bid_wait_sec;
   // Drop peer bid packets older than this (seconds) when merging.
   double gcaa_bid_timeout_sec;
+  /**
+   * Probabilistic frontier prioritization (arXiv:2604.03042, Devassy et al.):
+   * P(I|xi) from normalized volumetric gain, isotropic GMM with K chosen by
+   * BIC (practical substitute for full DP-GMM), then P(k*|xi) and joint
+   * P(k*,I|xi) scales the global exploration score when enabled.
+   */
+  bool dpfp_frontier_prioritization_enable;
+  int dpfp_max_components;
+  int dpfp_em_iterations;
+  double dpfp_floor_variance;
+  double dpfp_prob_epsilon;
+  /** Blend in [0,1]: score *= (1-blend) + blend * max(min_rel, j / j_max). */
+  double dpfp_score_blend;
+  double dpfp_min_relative_joint;
+  /**
+   * EFMES-style frontier scoring (Zuo et al., Meas. Sci. Technol. 36 086316):
+   * coarse-grid connectivity (Manhattan<=2), P~N(b)/d_path, repulsion Eq.(2)(3)
+   * as discount; scales global exploration score (auction/GCAA unchanged).
+   */
+  bool efmes_frontier_enable;
+  double efmes_cluster_cell_m;
+  double efmes_path_dist_eps;
+  double efmes_d0_rep_m;
+  double efmes_alpha_safe;
+  double efmes_amax;
+  /** Scales K_rep = scale * alpha * v_max^2 / (2*amax). */
+  double efmes_k_rep_scale;
+  double efmes_repulsion_weight;
+  double efmes_score_blend;
+  double efmes_min_multiplier;
   // Communication topology (multi-robot). See CommTopologyMode.
   CommTopologyMode comm_topology_mode;
   double comm_max_range_m;

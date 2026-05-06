@@ -1,6 +1,8 @@
 #include "mggplanner/rrg.h"
 
 #include "mggplanner/comm_link_model.h"
+#include "mggplanner/dpfp_frontier_prioritizer.h"
+#include "mggplanner/efmes_frontier_scorer.h"
 
 #include <algorithm>
 #include <ctime>
@@ -6832,6 +6834,646 @@ bool Rrg::isRemainingTimeSufficient(const double& time_cost,
   return true;
 }
 
+double Rrg::computeGlobalFrontierPathRisk(const std::vector<int>& path_ids) const {
+  if (path_ids.size() < 2) return 0.0;
+  const double eps = 1e-3;
+  double sum_risk = 0.0;
+  int n_segments = 0;
+  for (size_t i = 1; i < path_ids.size(); ++i) {
+    const StateVec& prev = global_graph_->getVertex(path_ids[i - 1])->state;
+    const StateVec& curr = global_graph_->getVertex(path_ids[i])->state;
+    const double dx = curr[0] - prev[0];
+    const double dy = curr[1] - prev[1];
+    const double dz = curr[2] - prev[2];
+    const double horiz = std::sqrt(dx * dx + dy * dy + eps);
+    const double inc = std::atan2(std::abs(dz), horiz);
+    double max_incl = planning_params_.max_inclination;
+    if (max_incl < eps) max_incl = eps;
+    double normalized_inc = inc / max_incl;
+    if (normalized_inc > 1.0) normalized_inc = 1.0;
+    sum_risk += normalized_inc;
+    ++n_segments;
+  }
+  return (n_segments > 0) ? (sum_risk / n_segments) : 0.0;
+}
+
+Rrg::GlobalFrontierScoreBreakdown Rrg::evaluateGlobalFrontierVertexScore(
+    Vertex* f, const ShortestPathsReport& frontier_graph_rep,
+    bool ignore_time) {
+  GlobalFrontierScoreBreakdown out;
+  const double kGDistancePenalty = 0.05;
+  const double kGOtherRobotPenalty = 0.001;
+
+  std::vector<int> frontier_to_home_path_id;
+  global_graph_->getShortestPath(f->id, frontier_graph_rep, true,
+                                 out.current_to_frontier_path_id);
+  global_graph_->getShortestPath(f->id, global_graph_rep_, false,
+                                 frontier_to_home_path_id);
+  out.current_to_frontier_distance =
+      global_graph_->getShortestDistance(f->id, frontier_graph_rep);
+  double frontier_to_home_distance =
+      global_graph_->getShortestDistance(f->id, global_graph_rep_);
+
+  double time_to_target =
+      out.current_to_frontier_distance / planning_params_.v_homing_max;
+  double time_to_home =
+      frontier_to_home_distance / planning_params_.v_homing_max;
+  double time_cost = (planning_params_.auto_homing_enable)
+                         ? (time_to_target + time_to_home)
+                         : time_to_target;
+  double time_spare = 0;
+  if (!isRemainingTimeSufficient(time_cost, time_spare)) {
+    time_spare = 1;
+  }
+
+  if (planning_params_.baseline_greedy_nearest_frontier_enable) {
+    out.score = 1.0 / (1.0 + out.current_to_frontier_distance);
+  } else if (planning_params_.utility_frontier_enable) {
+    const double path_risk =
+        computeGlobalFrontierPathRisk(out.current_to_frontier_path_id);
+    out.score = f->vol_gain.gain -
+                planning_params_.utility_frontier_alpha *
+                    out.current_to_frontier_distance -
+                planning_params_.utility_frontier_beta * path_risk;
+  } else {
+    out.score =
+        f->vol_gain.gain *
+        exp(-kGDistancePenalty * out.current_to_frontier_distance);
+    if (f->robot_id != robot_id_) {
+      out.score *= kGOtherRobotPenalty;
+    }
+  }
+  if (!ignore_time) out.score *= time_spare;
+  return out;
+}
+
+int Rrg::parseRobotIdFromPeerTfFrame(const std::string& frame) {
+  size_t pos = frame.find('R');
+  if (pos == std::string::npos || pos + 1 >= frame.size()) return -1;
+  size_t end = pos + 1;
+  while (end < frame.size() && frame[end] >= '0' && frame[end] <= '9') ++end;
+  if (end == pos + 1) return -1;
+  return std::atoi(frame.substr(pos + 1, end - (pos + 1)).c_str());
+}
+
+void Rrg::fillTeamRobotWorldPositions(
+    std::unordered_map<int, Eigen::Vector3d>* robot_positions) {
+  (*robot_positions)[(int)robot_id_] = current_state_.head(3);
+  for (const auto& peer_frame : comm_constraint_peer_frames_) {
+    int pid = parseRobotIdFromPeerTfFrame(peer_frame);
+    if (pid <= 0 || pid == (int)robot_id_ ||
+        robot_positions->find(pid) != robot_positions->end()) {
+      continue;
+    }
+    tf::StampedTransform peer_tf;
+    try {
+      listener_->lookupTransform(world_frame_, peer_frame, ros::Time(0),
+                                 peer_tf);
+      (*robot_positions)[pid] = Eigen::Vector3d(peer_tf.getOrigin().x(),
+                                                peer_tf.getOrigin().y(),
+                                                peer_tf.getOrigin().z());
+    } catch (tf::TransformException& ex) {
+      ROS_WARN_THROTTLE(2.0, "[Auction] TF lookup failed (%s -> %s): %s",
+                        world_frame_.c_str(), peer_frame.c_str(), ex.what());
+    }
+  }
+}
+
+void Rrg::collectAuctionRobotPositions(
+    std::unordered_map<int, Eigen::Vector3d>* robot_positions) {
+  fillTeamRobotWorldPositions(robot_positions);
+}
+
+std::unordered_map<int, double> Rrg::buildDpfpJointMapForFeasibleFrontiers(
+    const std::vector<Vertex*>& feasible_global_frontiers) const {
+  std::unordered_map<int, double> empty;
+  if (!planning_params_.dpfp_frontier_prioritization_enable ||
+      feasible_global_frontiers.empty()) {
+    return empty;
+  }
+  std::vector<DpfpFrontierPrioritizer::Viewpoint> vps;
+  vps.reserve(feasible_global_frontiers.size());
+  for (auto* f : feasible_global_frontiers) {
+    DpfpFrontierPrioritizer::Viewpoint vp;
+    vp.frontier_id = f->id;
+    vp.position = f->state.head<3>();
+    vp.information_gain = std::max(1e-9, static_cast<double>(f->vol_gain.gain));
+    vps.push_back(vp);
+  }
+  const Eigen::Vector3d robot = current_state_.head<3>();
+  return DpfpFrontierPrioritizer::computeJointPriorities(
+      vps, robot, planning_params_.dpfp_max_components,
+      planning_params_.dpfp_em_iterations, planning_params_.dpfp_floor_variance,
+      planning_params_.dpfp_prob_epsilon);
+}
+
+double Rrg::scaleGlobalFrontierScoreWithDpfp(
+    double base_score, int frontier_id,
+    const std::unordered_map<int, double>* dpfp_joint) const {
+  if (!dpfp_joint || dpfp_joint->empty()) return base_score;
+  auto it = dpfp_joint->find(frontier_id);
+  if (it == dpfp_joint->end()) return base_score;
+  double jmax = planning_params_.dpfp_prob_epsilon;
+  for (const auto& kv : *dpfp_joint) {
+    jmax = std::max(jmax, kv.second);
+  }
+  const double jn =
+      std::max(it->second, planning_params_.dpfp_prob_epsilon);
+  const double jnorm = std::min(1.0, jn / jmax);
+  const double b = planning_params_.dpfp_score_blend;
+  const double m = planning_params_.dpfp_min_relative_joint;
+  return base_score * ((1.0 - b) + b * std::max(m, jnorm));
+}
+
+std::unordered_map<int, double>
+Rrg::buildEfmesMultiplierMapForFeasibleFrontiers(
+    const std::vector<Vertex*>& feasible_global_frontiers,
+    const ShortestPathsReport& frontier_graph_rep, bool ignore_time,
+    const std::unordered_map<int, Eigen::Vector3d>& team_positions) {
+  std::unordered_map<int, double> empty;
+  if (!planning_params_.efmes_frontier_enable ||
+      feasible_global_frontiers.empty()) {
+    return empty;
+  }
+  std::vector<EfmesFrontierScorer::FrontierSample> samples;
+  samples.reserve(feasible_global_frontiers.size());
+  for (auto* f : feasible_global_frontiers) {
+    GlobalFrontierScoreBreakdown ev =
+        evaluateGlobalFrontierVertexScore(f, frontier_graph_rep, ignore_time);
+    EfmesFrontierScorer::FrontierSample s;
+    s.frontier_id = f->id;
+    s.x = f->state[0];
+    s.y = f->state[1];
+    s.path_dist_m = std::max(planning_params_.efmes_path_dist_eps,
+                             ev.current_to_frontier_distance);
+    samples.push_back(s);
+  }
+  const double k_rep =
+      planning_params_.efmes_k_rep_scale * planning_params_.efmes_alpha_safe *
+      planning_params_.v_max * planning_params_.v_max /
+      (2.0 * planning_params_.efmes_amax);
+  return EfmesFrontierScorer::computeFrontierMultipliers(
+      samples, team_positions, static_cast<int>(robot_id_),
+      planning_params_.efmes_cluster_cell_m, planning_params_.efmes_path_dist_eps,
+      planning_params_.efmes_d0_rep_m, k_rep,
+      planning_params_.efmes_repulsion_weight,
+      planning_params_.efmes_score_blend,
+      planning_params_.efmes_min_multiplier);
+}
+
+double Rrg::scaleGlobalFrontierScoreWithEfmes(
+    double base_score, int frontier_id,
+    const std::unordered_map<int, double>* efmes_mult) const {
+  if (!efmes_mult || efmes_mult->empty()) return base_score;
+  auto it = efmes_mult->find(frontier_id);
+  if (it == efmes_mult->end()) return base_score;
+  return base_score * std::max(1e-9, it->second);
+}
+
+double Rrg::computeFrontierAuctionBid(const Eigen::Vector3d& robot_pos,
+                                      Vertex* f) const {
+  const Eigen::Vector3d rel = f->state.head(3) - robot_pos;
+  const double dist = rel.norm();
+  const double eps = 1e-3;
+  const double horiz = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + eps);
+  const double inc = std::atan2(std::abs(rel[2]), horiz);
+  double max_incl = planning_params_.max_inclination;
+  if (max_incl < eps) max_incl = eps;
+  double risk = inc / max_incl;
+  if (risk > 1.0) risk = 1.0;
+  return f->vol_gain.gain -
+         planning_params_.auction_frontier_alpha * dist -
+         planning_params_.auction_frontier_beta * risk;
+}
+
+bool Rrg::frontierPassesSinglePassAuctionFilter(
+    Vertex* f, bool auction_enabled,
+    const std::unordered_map<int, Eigen::Vector3d>& robot_positions,
+    std::unordered_map<int, int>* frontier_winner_map) {
+  if (!auction_enabled || robot_positions.empty()) return true;
+  int winner_robot_id = -1;
+  double winner_bid = -std::numeric_limits<double>::infinity();
+  for (const auto& kv : robot_positions) {
+    const int rid = kv.first;
+    const double bid = computeFrontierAuctionBid(kv.second, f);
+    if (bid > winner_bid ||
+        (std::abs(bid - winner_bid) < 1e-6 &&
+         (winner_robot_id < 0 || rid < winner_robot_id))) {
+      winner_bid = bid;
+      winner_robot_id = rid;
+    }
+  }
+  ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
+                "[Auction][R%u] frontier=%d winner=R%d bid=%.3f", robot_id_,
+                f->id, winner_robot_id, winner_bid);
+  (*frontier_winner_map)[f->id] = winner_robot_id;
+  return winner_robot_id == (int)robot_id_;
+}
+
+void Rrg::runGcaaMultiRoundFrontierAssignment(
+    const std::vector<Vertex*>& feasible_global_frontiers,
+    bool gcaa_full_enabled,
+    const std::unordered_map<int, Eigen::Vector3d>& robot_positions,
+    const ShortestPathsReport& frontier_graph_rep, bool ignore_time,
+    const std::unordered_map<int, double>* efmes_mult,
+    const std::unordered_map<int, double>* dpfp_joint,
+    std::unordered_map<int, double>* frontier_exp_gain,
+    std::unordered_map<int, int>* frontier_winner_map, double* best_gain,
+    Vertex** best_frontier) {
+  std::unordered_map<int, std::unordered_map<int, double>> bid_table;
+  const std::unordered_map<int, std::unordered_map<int, double>>*
+      bid_table_ptr = nullptr;
+  if (gcaa_full_enabled) {
+    for (auto* f : feasible_global_frontiers) {
+      bid_table[(int)robot_id_][f->id] =
+          computeFrontierAuctionBid(robot_positions.at((int)robot_id_), f);
+    }
+    planner_msgs::GcaaBidPacket pkt;
+    pkt.header.stamp = ros::Time::now();
+    pkt.header.frame_id = world_frame_;
+    pkt.robot_id = robot_id_;
+    for (auto* f : feasible_global_frontiers) {
+      pkt.frontier_ids.push_back(f->id);
+      pkt.bids.push_back(bid_table[(int)robot_id_][f->id]);
+    }
+    gcaa_bid_pub_.publish(pkt);
+    const double wait_sec = planning_params_.gcaa_bid_wait_sec;
+    ros::Time t0 = ros::Time::now();
+    while ((ros::Time::now() - t0).toSec() < wait_sec) {
+      ros::spinOnce();
+      ros::Duration(0.002).sleep();
+    }
+    {
+      std::lock_guard<std::mutex> lock(gcaa_bid_mutex_);
+      for (auto it = gcaa_peer_packets_.begin();
+           it != gcaa_peer_packets_.end();) {
+        if ((ros::Time::now() - it->second.header.stamp).toSec() >
+            planning_params_.gcaa_bid_timeout_sec) {
+          it = gcaa_peer_packets_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      for (const auto& kv : gcaa_peer_packets_) {
+        const auto& p = kv.second;
+        if (p.robot_id == robot_id_) continue;
+        for (size_t i = 0; i < p.frontier_ids.size() && i < p.bids.size();
+             ++i) {
+          bid_table[p.robot_id][p.frontier_ids[i]] = p.bids[i];
+        }
+      }
+    }
+    bid_table_ptr = &bid_table;
+  }
+
+  auto get_bid = [&](int rid, Vertex* v) -> double {
+    if (gcaa_full_enabled && bid_table_ptr) {
+      auto r_it = bid_table_ptr->find(rid);
+      if (r_it != bid_table_ptr->end()) {
+        auto b_it = r_it->second.find(v->id);
+        if (b_it != r_it->second.end()) return b_it->second;
+      }
+      auto pos_it = robot_positions.find(rid);
+      if (pos_it != robot_positions.end()) {
+        return computeFrontierAuctionBid(pos_it->second, v);
+      }
+      return -std::numeric_limits<double>::infinity();
+    }
+    auto pos_it = robot_positions.find(rid);
+    if (pos_it == robot_positions.end()) {
+      return -std::numeric_limits<double>::infinity();
+    }
+    return computeFrontierAuctionBid(pos_it->second, v);
+  };
+
+  std::vector<int> remaining_frontier_ids;
+  remaining_frontier_ids.reserve(feasible_global_frontiers.size());
+  std::unordered_map<int, Vertex*> frontier_by_id;
+  for (auto* f : feasible_global_frontiers) {
+    remaining_frontier_ids.push_back(f->id);
+    frontier_by_id[f->id] = f;
+  }
+
+  std::vector<int> active_robot_ids;
+  if (gcaa_full_enabled) {
+    std::unordered_set<int> id_set;
+    for (const auto& kv : robot_positions) id_set.insert(kv.first);
+    for (const auto& kv : bid_table) id_set.insert(kv.first);
+    active_robot_ids.assign(id_set.begin(), id_set.end());
+    std::sort(active_robot_ids.begin(), active_robot_ids.end());
+  } else {
+    active_robot_ids.reserve(robot_positions.size());
+    for (const auto& kv : robot_positions) {
+      active_robot_ids.push_back(kv.first);
+    }
+  }
+  const int max_rounds = std::max(1, (int)active_robot_ids.size());
+  std::unordered_map<int, int> robot_assignment;
+
+  for (int round = 0; round < max_rounds; ++round) {
+    if (active_robot_ids.empty() || remaining_frontier_ids.empty()) break;
+
+    std::unordered_map<int, std::pair<int, double>> best_for_frontier;
+    for (const int rid : active_robot_ids) {
+      if (!gcaa_full_enabled) {
+        auto pos_it = robot_positions.find(rid);
+        if (pos_it == robot_positions.end()) continue;
+      }
+
+      int best_fid = -1;
+      double best_bid = -std::numeric_limits<double>::infinity();
+      for (const int fid : remaining_frontier_ids) {
+        auto fit = frontier_by_id.find(fid);
+        if (fit == frontier_by_id.end() || fit->second == NULL) continue;
+        const double bid = get_bid(rid, fit->second);
+        if (bid > best_bid) {
+          best_bid = bid;
+          best_fid = fid;
+        }
+      }
+      if (best_fid < 0) continue;
+      auto fw_it = best_for_frontier.find(best_fid);
+      if (fw_it == best_for_frontier.end() ||
+          best_bid > fw_it->second.second ||
+          (std::abs(best_bid - fw_it->second.second) < 1e-6 &&
+           rid < fw_it->second.first)) {
+        best_for_frontier[best_fid] = std::make_pair(rid, best_bid);
+      }
+    }
+
+    if (best_for_frontier.empty()) break;
+
+    std::vector<int> next_active;
+    next_active.reserve(active_robot_ids.size());
+    std::unordered_map<int, bool> robot_won;
+    std::unordered_map<int, bool> frontier_taken;
+    for (const auto& kv : best_for_frontier) {
+      const int fid = kv.first;
+      const int rid = kv.second.first;
+      const double bid = kv.second.second;
+      robot_assignment[rid] = fid;
+      (*frontier_winner_map)[fid] = rid;
+      (*frontier_exp_gain)[fid] = bid;
+      robot_won[rid] = true;
+      frontier_taken[fid] = true;
+    }
+
+    std::vector<int> tmp_frontiers;
+    tmp_frontiers.reserve(remaining_frontier_ids.size());
+    for (const int fid : remaining_frontier_ids) {
+      if (frontier_taken.find(fid) == frontier_taken.end()) {
+        tmp_frontiers.push_back(fid);
+      }
+    }
+    remaining_frontier_ids.swap(tmp_frontiers);
+
+    for (const int rid : active_robot_ids) {
+      if (robot_won.find(rid) == robot_won.end()) {
+        next_active.push_back(rid);
+      }
+    }
+    active_robot_ids.swap(next_active);
+  }
+
+  auto self_it = robot_assignment.find((int)robot_id_);
+  if (self_it != robot_assignment.end()) {
+    const int assigned_fid = self_it->second;
+    auto fit = frontier_by_id.find(assigned_fid);
+    if (fit != frontier_by_id.end()) {
+      Vertex* f = fit->second;
+      GlobalFrontierScoreBreakdown ev =
+          evaluateGlobalFrontierVertexScore(f, frontier_graph_rep, ignore_time);
+      double scaled = scaleGlobalFrontierScoreWithEfmes(ev.score, f->id,
+                                                        efmes_mult);
+      scaled = scaleGlobalFrontierScoreWithDpfp(scaled, f->id, dpfp_joint);
+      (*frontier_exp_gain)[f->id] = scaled;
+      if (scaled > *best_gain) {
+        *best_gain = scaled;
+        *best_frontier = f;
+      }
+      ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
+                    "[%s][R%u] assigned frontier=%d gain=%.3f dist=%.3f",
+                    gcaa_full_enabled ? "GCAA-full" : "GCAA-lite", robot_id_,
+                    f->id, scaled, ev.current_to_frontier_distance);
+    }
+  }
+}
+
+void Rrg::scoreFeasibleFrontiersWithSinglePassAuction(
+    const std::vector<Vertex*>& feasible_global_frontiers,
+    bool auction_enabled,
+    const std::unordered_map<int, Eigen::Vector3d>& robot_positions,
+    const ShortestPathsReport& frontier_graph_rep, bool ignore_time,
+    const std::unordered_map<int, double>* efmes_mult,
+    const std::unordered_map<int, double>* dpfp_joint,
+    std::unordered_map<int, double>* frontier_exp_gain,
+    std::unordered_map<int, int>* frontier_winner_map, double* best_gain,
+    Vertex** best_frontier) {
+  for (size_t i = 0; i < feasible_global_frontiers.size(); ++i) {
+    Vertex* f = feasible_global_frontiers[i];
+    if (!frontierPassesSinglePassAuctionFilter(f, auction_enabled,
+                                               robot_positions,
+                                               frontier_winner_map)) {
+      continue;
+    }
+    GlobalFrontierScoreBreakdown ev =
+        evaluateGlobalFrontierVertexScore(f, frontier_graph_rep, ignore_time);
+    double scaled = scaleGlobalFrontierScoreWithEfmes(ev.score, f->id, efmes_mult);
+    scaled = scaleGlobalFrontierScoreWithDpfp(scaled, f->id, dpfp_joint);
+    (*frontier_exp_gain)[f->id] = scaled;
+    if (scaled > *best_gain) {
+      *best_gain = scaled;
+      *best_frontier = f;
+    }
+    ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
+                  "[R%u] frontier=%d gain=%.3f dist=%.3f", robot_id_, f->id,
+                  scaled, ev.current_to_frontier_distance);
+  }
+}
+
+void Rrg::maybeApplyAuctionEmptyFallbackToLegacy(
+    bool auction_enabled,
+    const std::vector<Vertex*>& feasible_global_frontiers,
+    const ShortestPathsReport& frontier_graph_rep, bool ignore_time,
+    const std::unordered_map<int, double>* efmes_mult,
+    const std::unordered_map<int, double>* dpfp_joint,
+    std::unordered_map<int, double>* frontier_exp_gain, double* best_gain,
+    Vertex** best_frontier) {
+  if (!frontier_exp_gain->empty() || !auction_enabled ||
+      !planning_params_.auction_fallback_to_legacy) {
+    return;
+  }
+  ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
+                "[Auction][R%u] no assigned frontier, fallback to legacy scoring.",
+                robot_id_);
+  for (size_t i = 0; i < feasible_global_frontiers.size(); ++i) {
+    Vertex* f = feasible_global_frontiers[i];
+    GlobalFrontierScoreBreakdown ev =
+        evaluateGlobalFrontierVertexScore(f, frontier_graph_rep, ignore_time);
+    double scaled = scaleGlobalFrontierScoreWithEfmes(ev.score, f->id, efmes_mult);
+    scaled = scaleGlobalFrontierScoreWithDpfp(scaled, f->id, dpfp_joint);
+    (*frontier_exp_gain)[f->id] = scaled;
+    if (scaled > *best_gain) {
+      *best_gain = scaled;
+      *best_frontier = f;
+    }
+  }
+}
+
+void Rrg::sortFeasibleGlobalFrontiersByDescendingGain(
+    std::vector<Vertex*>* feasible_global_frontiers,
+    std::unordered_map<int, double>* frontier_exp_gain) {
+  std::sort(feasible_global_frontiers->begin(), feasible_global_frontiers->end(),
+            [frontier_exp_gain](const Vertex* a, const Vertex* b) {
+              return (*frontier_exp_gain)[a->id] > (*frontier_exp_gain)[b->id];
+            });
+}
+
+void Rrg::publishAuctionFrontierWinnerVisualization(
+    bool auction_enabled,
+    const std::vector<Vertex*>& feasible_global_frontiers,
+    const std::unordered_map<int, int>& frontier_winner_map) {
+  if (!auction_enabled ||
+      auction_frontier_markers_pub_.getNumSubscribers() <= 0) {
+    return;
+  }
+  visualization_msgs::MarkerArray winner_markers;
+
+  visualization_msgs::Marker clear_marker;
+  clear_marker.header.stamp = ros::Time::now();
+  clear_marker.header.frame_id = world_frame_;
+  clear_marker.ns = "auction_frontier_winners";
+  clear_marker.id = 0;
+  clear_marker.action = visualization_msgs::Marker::DELETEALL;
+  winner_markers.markers.push_back(clear_marker);
+
+  int marker_id = 1;
+  for (auto& f : feasible_global_frontiers) {
+    auto it = frontier_winner_map.find(f->id);
+    if (it == frontier_winner_map.end()) continue;
+    const int winner = it->second;
+    float r = 1.0f, g = 1.0f, b = 1.0f;
+    const int winner_mod = ((winner % 3) + 3) % 3;
+    if (winner_mod == 1) {
+      r = 1.0f;
+      g = 0.0f;
+      b = 0.0f;
+    } else if (winner_mod == 2) {
+      r = 0.0f;
+      g = 1.0f;
+      b = 0.0f;
+    } else if (winner_mod == 0) {
+      r = 0.0f;
+      g = 0.0f;
+      b = 1.0f;
+    }
+
+    visualization_msgs::Marker point_marker;
+    point_marker.header.stamp = ros::Time::now();
+    point_marker.header.frame_id = world_frame_;
+    point_marker.ns = "auction_frontier_winners_points";
+    point_marker.id = marker_id++;
+    point_marker.type = visualization_msgs::Marker::SPHERE;
+    point_marker.action = visualization_msgs::Marker::ADD;
+    point_marker.pose.position.x = f->state[0];
+    point_marker.pose.position.y = f->state[1];
+    point_marker.pose.position.z = f->state[2] + 0.2;
+    point_marker.pose.orientation.w = 1.0;
+    point_marker.scale.x = 0.35;
+    point_marker.scale.y = 0.35;
+    point_marker.scale.z = 0.35;
+    point_marker.color.a = 0.85;
+    point_marker.color.r = r;
+    point_marker.color.g = g;
+    point_marker.color.b = b;
+    winner_markers.markers.push_back(point_marker);
+
+    visualization_msgs::Marker text_marker;
+    text_marker.header.stamp = ros::Time::now();
+    text_marker.header.frame_id = world_frame_;
+    text_marker.ns = "auction_frontier_winners_text";
+    text_marker.id = marker_id++;
+    text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+    text_marker.action = visualization_msgs::Marker::ADD;
+    text_marker.pose.position.x = f->state[0];
+    text_marker.pose.position.y = f->state[1];
+    text_marker.pose.position.z = f->state[2] + 0.75;
+    text_marker.pose.orientation.w = 1.0;
+    text_marker.scale.z = 0.35;
+    text_marker.color.a = 1.0;
+    text_marker.color.r = r;
+    text_marker.color.g = g;
+    text_marker.color.b = b;
+    text_marker.text = "winner=R" + std::to_string(winner);
+    winner_markers.markers.push_back(text_marker);
+  }
+  auction_frontier_markers_pub_.publish(winner_markers);
+}
+
+void Rrg::performAutomaticGlobalFrontierSelection(
+    const ShortestPathsReport& frontier_graph_rep, bool ignore_time,
+    std::vector<Vertex*>* feasible_global_frontiers, double* best_gain,
+    Vertex** best_frontier) {
+  std::unordered_map<int, double> frontier_exp_gain;
+  const bool auction_enabled =
+      !planning_params_.independent_planning_enable &&
+      planning_params_.auction_frontier_enable &&
+      !planning_params_.baseline_greedy_nearest_frontier_enable;
+  const bool gcaa_full_enabled =
+      auction_enabled && planning_params_.gcaa_full_enable;
+  const bool gcaa_lite_enabled =
+      auction_enabled && planning_params_.gcaa_lite_enable && !gcaa_full_enabled;
+
+  std::unordered_map<int, Eigen::Vector3d> robot_positions;
+  if (auction_enabled) {
+    collectAuctionRobotPositions(&robot_positions);
+  } else if (planning_params_.efmes_frontier_enable) {
+    fillTeamRobotWorldPositions(&robot_positions);
+  }
+
+  const bool run_multi_round_gcaa =
+      gcaa_full_enabled ||
+      (gcaa_lite_enabled && !robot_positions.empty());
+
+  std::unordered_map<int, double> dpfp_joint_map =
+      buildDpfpJointMapForFeasibleFrontiers(*feasible_global_frontiers);
+  const std::unordered_map<int, double>* dpfp_joint_ptr =
+      dpfp_joint_map.empty() ? nullptr : &dpfp_joint_map;
+
+  std::unordered_map<int, double> efmes_mult_map =
+      buildEfmesMultiplierMapForFeasibleFrontiers(*feasible_global_frontiers,
+                                                  frontier_graph_rep, ignore_time,
+                                                  robot_positions);
+  const std::unordered_map<int, double>* efmes_mult_ptr =
+      efmes_mult_map.empty() ? nullptr : &efmes_mult_map;
+
+  std::unordered_map<int, int> frontier_winner_map;
+
+  if (run_multi_round_gcaa) {
+    runGcaaMultiRoundFrontierAssignment(
+        *feasible_global_frontiers, gcaa_full_enabled, robot_positions,
+        frontier_graph_rep, ignore_time, efmes_mult_ptr, dpfp_joint_ptr,
+        &frontier_exp_gain, &frontier_winner_map, best_gain, best_frontier);
+  } else {
+    scoreFeasibleFrontiersWithSinglePassAuction(
+        *feasible_global_frontiers, auction_enabled, robot_positions,
+        frontier_graph_rep, ignore_time, efmes_mult_ptr, dpfp_joint_ptr,
+        &frontier_exp_gain, &frontier_winner_map, best_gain, best_frontier);
+  }
+
+  maybeApplyAuctionEmptyFallbackToLegacy(
+      auction_enabled, *feasible_global_frontiers, frontier_graph_rep,
+      ignore_time, efmes_mult_ptr, dpfp_joint_ptr, &frontier_exp_gain,
+      best_gain, best_frontier);
+
+  sortFeasibleGlobalFrontiersByDescendingGain(feasible_global_frontiers,
+                                              &frontier_exp_gain);
+
+  publishAuctionFrontierWinnerVisualization(auction_enabled,
+                                            *feasible_global_frontiers,
+                                            frontier_winner_map);
+}
+
 std::vector<geometry_msgs::Pose> Rrg::reRunGlobalPlanner() {
   return runGlobalPlanner(current_global_vertex_id_, true, true);
 }
@@ -7061,462 +7703,9 @@ std::vector<geometry_msgs::Pose> Rrg::runGlobalPlanner(int vertex_id,
       return ret_path;
     }
 
-    // Compute exploration gain.
-    // Optional utility-based frontier selection:
-    // score = unknown_gain - alpha * distance - beta * risk.
-    auto compute_frontier_path_risk = [this](const std::vector<int>& path_ids) {
-      if (path_ids.size() < 2) return 0.0;
-      const double eps = 1e-3;
-      double sum_risk = 0.0;
-      int n_segments = 0;
-      for (size_t i = 1; i < path_ids.size(); ++i) {
-        const StateVec& prev = global_graph_->getVertex(path_ids[i - 1])->state;
-        const StateVec& curr = global_graph_->getVertex(path_ids[i])->state;
-        const double dx = curr[0] - prev[0];
-        const double dy = curr[1] - prev[1];
-        const double dz = curr[2] - prev[2];
-        const double horiz = std::sqrt(dx * dx + dy * dy + eps);
-        const double inc = std::atan2(std::abs(dz), horiz);
-        double max_incl = planning_params_.max_inclination;
-        if (max_incl < eps) max_incl = eps;
-        double normalized_inc = inc / max_incl;
-        if (normalized_inc > 1.0) normalized_inc = 1.0;
-        sum_risk += normalized_inc;
-        ++n_segments;
-      }
-      return (n_segments > 0) ? (sum_risk / n_segments) : 0.0;
-    };
-
-    std::unordered_map<int, double> frontier_exp_gain;
-    const double kGDistancePenalty = 0.05;      // Original : 0.01
-    const double kGOtherRobotPenalty = 0.001;   // preferred 0.001
-    const bool auction_enabled =
-        !planning_params_.independent_planning_enable &&
-        planning_params_.auction_frontier_enable &&
-        !planning_params_.baseline_greedy_nearest_frontier_enable;
-    const bool gcaa_full_enabled =
-        auction_enabled && planning_params_.gcaa_full_enable;
-    const bool gcaa_lite_enabled =
-        auction_enabled && planning_params_.gcaa_lite_enable && !gcaa_full_enabled;
-
-    auto parse_robot_id_from_frame = [](const std::string& frame) {
-      size_t pos = frame.find('R');
-      if (pos == std::string::npos || pos + 1 >= frame.size()) return -1;
-      size_t end = pos + 1;
-      while (end < frame.size() && frame[end] >= '0' && frame[end] <= '9') ++end;
-      if (end == pos + 1) return -1;
-      return std::atoi(frame.substr(pos + 1, end - (pos + 1)).c_str());
-    };
-
-    std::unordered_map<int, Eigen::Vector3d> robot_positions;
-    if (auction_enabled) {
-      robot_positions[(int)robot_id_] = current_state_.head(3);
-      for (const auto& peer_frame : comm_constraint_peer_frames_) {
-        int pid = parse_robot_id_from_frame(peer_frame);
-        if (pid <= 0 || pid == (int)robot_id_ ||
-            robot_positions.find(pid) != robot_positions.end()) {
-          continue;
-        }
-        tf::StampedTransform peer_tf;
-        try {
-          listener_->lookupTransform(world_frame_, peer_frame, ros::Time(0), peer_tf);
-          robot_positions[pid] = Eigen::Vector3d(peer_tf.getOrigin().x(),
-                                                 peer_tf.getOrigin().y(),
-                                                 peer_tf.getOrigin().z());
-        } catch (tf::TransformException& ex) {
-          ROS_WARN_THROTTLE(2.0, "[Auction] TF lookup failed (%s -> %s): %s",
-                            world_frame_.c_str(), peer_frame.c_str(), ex.what());
-        }
-      }
-    }
-
-    const bool run_multi_round_gcaa =
-        gcaa_full_enabled ||
-        (gcaa_lite_enabled && !robot_positions.empty());
-
-    auto evaluate_frontier_score = [&](Vertex* f, double* score_out,
-                                       double* dist_out,
-                                       std::vector<int>* path_out) {
-      std::vector<int> current_to_frontier_path_id;
-      std::vector<int> frontier_to_home_path_id;
-      global_graph_->getShortestPath(f->id, frontier_graph_rep, true,
-                                     current_to_frontier_path_id);
-      global_graph_->getShortestPath(f->id, global_graph_rep_, false,
-                                     frontier_to_home_path_id);
-      double current_to_frontier_distance =
-          global_graph_->getShortestDistance(f->id, frontier_graph_rep);
-      double frontier_to_home_distance =
-          global_graph_->getShortestDistance(f->id, global_graph_rep_);
-
-      double time_to_target =
-          current_to_frontier_distance / planning_params_.v_homing_max;
-      double time_to_home =
-          frontier_to_home_distance / planning_params_.v_homing_max;
-      double time_cost = (planning_params_.auto_homing_enable)
-                             ? (time_to_target + time_to_home)
-                             : time_to_target;
-      double time_spare = 0;
-      if (!isRemainingTimeSufficient(time_cost, time_spare)) {
-        time_spare = 1;
-      }
-
-      double score = 0.0;
-      if (planning_params_.baseline_greedy_nearest_frontier_enable) {
-        // Uncoordinated baseline: maximize nearness on the global graph only
-        // (1/(1+d) is strictly decreasing in path length d).
-        score = 1.0 / (1.0 + current_to_frontier_distance);
-      } else if (planning_params_.utility_frontier_enable) {
-        const double path_risk = compute_frontier_path_risk(current_to_frontier_path_id);
-        score = f->vol_gain.gain -
-                planning_params_.utility_frontier_alpha * current_to_frontier_distance -
-                planning_params_.utility_frontier_beta * path_risk;
-      } else {
-        score = f->vol_gain.gain * exp(-kGDistancePenalty * current_to_frontier_distance);
-        if (f->robot_id != robot_id_) {
-          score *= kGOtherRobotPenalty;
-        }
-      }
-      if (!ignore_time) score *= time_spare;
-      *score_out = score;
-      *dist_out = current_to_frontier_distance;
-      *path_out = current_to_frontier_path_id;
-    };
-
-    std::unordered_map<int, int> frontier_winner_map;
-    auto compute_auction_bid = [&](const Eigen::Vector3d& robot_pos,
-                                   Vertex* f) {
-      const Eigen::Vector3d rel = f->state.head(3) - robot_pos;
-      const double dist = rel.norm();
-      const double eps = 1e-3;
-      const double horiz = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + eps);
-      const double inc = std::atan2(std::abs(rel[2]), horiz);
-      double max_incl = planning_params_.max_inclination;
-      if (max_incl < eps) max_incl = eps;
-      double risk = inc / max_incl;
-      if (risk > 1.0) risk = 1.0;
-      return f->vol_gain.gain -
-             planning_params_.auction_frontier_alpha * dist -
-             planning_params_.auction_frontier_beta * risk;
-    };
-
-    auto pass_auction_winner_filter = [&](Vertex* f) {
-      if (!auction_enabled || robot_positions.empty()) return true;
-      int winner_robot_id = -1;
-      double winner_bid = -std::numeric_limits<double>::infinity();
-      for (const auto& kv : robot_positions) {
-        const int rid = kv.first;
-        const double bid = compute_auction_bid(kv.second, f);
-        if (bid > winner_bid ||
-            (std::abs(bid - winner_bid) < 1e-6 &&
-             (winner_robot_id < 0 || rid < winner_robot_id))) {
-          winner_bid = bid;
-          winner_robot_id = rid;
-        }
-      }
-      ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
-                    "[Auction][R%u] frontier=%d winner=R%d bid=%.3f",
-                    robot_id_, f->id, winner_robot_id, winner_bid);
-      frontier_winner_map[f->id] = winner_robot_id;
-      return winner_robot_id == (int)robot_id_;
-    };
-
-    if (run_multi_round_gcaa) {
-      std::unordered_map<int, std::unordered_map<int, double>> bid_table;
-      const std::unordered_map<int, std::unordered_map<int, double>>*
-          bid_table_ptr = nullptr;
-      if (gcaa_full_enabled) {
-        for (auto* f : feasible_global_frontiers) {
-          bid_table[(int)robot_id_][f->id] = compute_auction_bid(
-              robot_positions[(int)robot_id_], f);
-        }
-        planner_msgs::GcaaBidPacket pkt;
-        pkt.header.stamp = ros::Time::now();
-        pkt.header.frame_id = world_frame_;
-        pkt.robot_id = robot_id_;
-        for (auto* f : feasible_global_frontiers) {
-          pkt.frontier_ids.push_back(f->id);
-          pkt.bids.push_back(bid_table[(int)robot_id_][f->id]);
-        }
-        gcaa_bid_pub_.publish(pkt);
-        const double wait_sec = planning_params_.gcaa_bid_wait_sec;
-        ros::Time t0 = ros::Time::now();
-        while ((ros::Time::now() - t0).toSec() < wait_sec) {
-          ros::spinOnce();
-          ros::Duration(0.002).sleep();
-        }
-        {
-          std::lock_guard<std::mutex> lock(gcaa_bid_mutex_);
-          for (auto it = gcaa_peer_packets_.begin();
-               it != gcaa_peer_packets_.end();) {
-            if ((ros::Time::now() - it->second.header.stamp).toSec() >
-                planning_params_.gcaa_bid_timeout_sec) {
-              it = gcaa_peer_packets_.erase(it);
-            } else {
-              ++it;
-            }
-          }
-          for (const auto& kv : gcaa_peer_packets_) {
-            const auto& p = kv.second;
-            if (p.robot_id == robot_id_) continue;
-            for (size_t i = 0; i < p.frontier_ids.size() && i < p.bids.size();
-                 ++i) {
-              bid_table[p.robot_id][p.frontier_ids[i]] = p.bids[i];
-            }
-          }
-        }
-        bid_table_ptr = &bid_table;
-      }
-
-      auto get_bid = [&](int rid, Vertex* v) -> double {
-        if (gcaa_full_enabled && bid_table_ptr) {
-          auto r_it = bid_table_ptr->find(rid);
-          if (r_it != bid_table_ptr->end()) {
-            auto b_it = r_it->second.find(v->id);
-            if (b_it != r_it->second.end()) return b_it->second;
-          }
-          auto pos_it = robot_positions.find(rid);
-          if (pos_it != robot_positions.end()) {
-            return compute_auction_bid(pos_it->second, v);
-          }
-          return -std::numeric_limits<double>::infinity();
-        }
-        auto pos_it = robot_positions.find(rid);
-        if (pos_it == robot_positions.end()) {
-          return -std::numeric_limits<double>::infinity();
-        }
-        return compute_auction_bid(pos_it->second, v);
-      };
-
-      std::vector<int> remaining_frontier_ids;
-      remaining_frontier_ids.reserve(feasible_global_frontiers.size());
-      std::unordered_map<int, Vertex*> frontier_by_id;
-      for (auto* f : feasible_global_frontiers) {
-        remaining_frontier_ids.push_back(f->id);
-        frontier_by_id[f->id] = f;
-      }
-
-      std::vector<int> active_robot_ids;
-      if (gcaa_full_enabled) {
-        std::unordered_set<int> id_set;
-        for (const auto& kv : robot_positions) id_set.insert(kv.first);
-        for (const auto& kv : bid_table) id_set.insert(kv.first);
-        active_robot_ids.assign(id_set.begin(), id_set.end());
-        std::sort(active_robot_ids.begin(), active_robot_ids.end());
-      } else {
-        active_robot_ids.reserve(robot_positions.size());
-        for (const auto& kv : robot_positions) {
-          active_robot_ids.push_back(kv.first);
-        }
-      }
-      const int max_rounds = std::max(1, (int)active_robot_ids.size());
-      std::unordered_map<int, int> robot_assignment;
-
-      for (int round = 0; round < max_rounds; ++round) {
-        if (active_robot_ids.empty() || remaining_frontier_ids.empty()) break;
-
-        std::unordered_map<int, std::pair<int, double>> best_for_frontier;
-        for (const int rid : active_robot_ids) {
-          if (!gcaa_full_enabled) {
-            auto pos_it = robot_positions.find(rid);
-            if (pos_it == robot_positions.end()) continue;
-          }
-
-          int best_fid = -1;
-          double best_bid = -std::numeric_limits<double>::infinity();
-          for (const int fid : remaining_frontier_ids) {
-            auto fit = frontier_by_id.find(fid);
-            if (fit == frontier_by_id.end() || fit->second == NULL) continue;
-            const double bid = get_bid(rid, fit->second);
-            if (bid > best_bid) {
-              best_bid = bid;
-              best_fid = fid;
-            }
-          }
-          if (best_fid < 0) continue;
-          auto fw_it = best_for_frontier.find(best_fid);
-          if (fw_it == best_for_frontier.end() ||
-              best_bid > fw_it->second.second ||
-              (std::abs(best_bid - fw_it->second.second) < 1e-6 &&
-               rid < fw_it->second.first)) {
-            best_for_frontier[best_fid] = std::make_pair(rid, best_bid);
-          }
-        }
-
-        if (best_for_frontier.empty()) break;
-
-        std::vector<int> next_active;
-        next_active.reserve(active_robot_ids.size());
-        std::unordered_map<int, bool> robot_won;
-        std::unordered_map<int, bool> frontier_taken;
-        for (const auto& kv : best_for_frontier) {
-          const int fid = kv.first;
-          const int rid = kv.second.first;
-          const double bid = kv.second.second;
-          robot_assignment[rid] = fid;
-          frontier_winner_map[fid] = rid;
-          frontier_exp_gain[fid] = bid;
-          robot_won[rid] = true;
-          frontier_taken[fid] = true;
-        }
-
-        std::vector<int> tmp_frontiers;
-        tmp_frontiers.reserve(remaining_frontier_ids.size());
-        for (const int fid : remaining_frontier_ids) {
-          if (frontier_taken.find(fid) == frontier_taken.end()) {
-            tmp_frontiers.push_back(fid);
-          }
-        }
-        remaining_frontier_ids.swap(tmp_frontiers);
-
-        for (const int rid : active_robot_ids) {
-          if (robot_won.find(rid) == robot_won.end()) {
-            next_active.push_back(rid);
-          }
-        }
-        active_robot_ids.swap(next_active);
-      }
-
-      auto self_it = robot_assignment.find((int)robot_id_);
-      if (self_it != robot_assignment.end()) {
-        const int assigned_fid = self_it->second;
-        auto fit = frontier_by_id.find(assigned_fid);
-        if (fit != frontier_by_id.end()) {
-          Vertex* f = fit->second;
-          double exp_gain = 0.0;
-          double current_to_frontier_distance = 0.0;
-          std::vector<int> current_to_frontier_path_id;
-          evaluate_frontier_score(f, &exp_gain, &current_to_frontier_distance,
-                                  &current_to_frontier_path_id);
-          frontier_exp_gain[f->id] = exp_gain;
-          if (exp_gain > best_gain) {
-            best_gain = exp_gain;
-            best_frontier = f;
-          }
-          ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
-                        "[%s][R%u] assigned frontier=%d gain=%.3f dist=%.3f",
-                        gcaa_full_enabled ? "GCAA-full" : "GCAA-lite",
-                        robot_id_, f->id, exp_gain, current_to_frontier_distance);
-        }
-      }
-    } else {
-      for (int i = 0; i < feasible_global_frontiers.size(); ++i) {
-        Vertex* f = feasible_global_frontiers[i];
-        if (!pass_auction_winner_filter(f)) {
-          continue;
-        }
-
-        double exp_gain = 0.0;
-        double current_to_frontier_distance = 0.0;
-        std::vector<int> current_to_frontier_path_id;
-        evaluate_frontier_score(f, &exp_gain, &current_to_frontier_distance,
-                                &current_to_frontier_path_id);
-
-        frontier_exp_gain[f->id] = exp_gain;
-        if (exp_gain > best_gain) {
-          best_gain = exp_gain;
-          best_frontier = f;
-        }
-        ROS_INFO_COND(global_verbosity >= Verbosity::INFO,
-                      "[R%u] frontier=%d gain=%.3f dist=%.3f",
-                      robot_id_, f->id, exp_gain, current_to_frontier_distance);
-      }
-    }
-
-    if (frontier_exp_gain.empty() && auction_enabled &&
-        planning_params_.auction_fallback_to_legacy) {
-      ROS_WARN_COND(global_verbosity >= Verbosity::WARN,
-                    "[Auction][R%u] no assigned frontier, fallback to legacy scoring.",
-                    robot_id_);
-      for (int i = 0; i < feasible_global_frontiers.size(); ++i) {
-        Vertex* f = feasible_global_frontiers[i];
-        double exp_gain = 0.0;
-        double current_to_frontier_distance = 0.0;
-        std::vector<int> current_to_frontier_path_id;
-        evaluate_frontier_score(f, &exp_gain, &current_to_frontier_distance,
-                                &current_to_frontier_path_id);
-        frontier_exp_gain[f->id] = exp_gain;
-        if (exp_gain > best_gain) {
-          best_gain = exp_gain;
-          best_frontier = f;
-        }
-      }
-    }
-
-    // Rank from the best one.
-    // Sort into descending order.
-    std::sort(feasible_global_frontiers.begin(),
-              feasible_global_frontiers.end(),
-              [&frontier_exp_gain](const Vertex* a, const Vertex* b) {
-                return frontier_exp_gain[a->id] > frontier_exp_gain[b->id];
-              });
-
-    if (auction_enabled && auction_frontier_markers_pub_.getNumSubscribers() > 0) {
-      visualization_msgs::MarkerArray winner_markers;
-
-      visualization_msgs::Marker clear_marker;
-      clear_marker.header.stamp = ros::Time::now();
-      clear_marker.header.frame_id = world_frame_;
-      clear_marker.ns = "auction_frontier_winners";
-      clear_marker.id = 0;
-      clear_marker.action = visualization_msgs::Marker::DELETEALL;
-      winner_markers.markers.push_back(clear_marker);
-
-      int marker_id = 1;
-      for (auto& f : feasible_global_frontiers) {
-        auto it = frontier_winner_map.find(f->id);
-        if (it == frontier_winner_map.end()) continue;
-        const int winner = it->second;
-        float r = 1.0f, g = 1.0f, b = 1.0f;
-        const int winner_mod = ((winner % 3) + 3) % 3;
-        if (winner_mod == 1) {
-          r = 1.0f; g = 0.0f; b = 0.0f;  // R1 red
-        } else if (winner_mod == 2) {
-          r = 0.0f; g = 1.0f; b = 0.0f;  // R2 green
-        } else if (winner_mod == 0) {
-          r = 0.0f; g = 0.0f; b = 1.0f;  // R3 blue (and multiples of 3)
-        }
-
-        visualization_msgs::Marker point_marker;
-        point_marker.header.stamp = ros::Time::now();
-        point_marker.header.frame_id = world_frame_;
-        point_marker.ns = "auction_frontier_winners_points";
-        point_marker.id = marker_id++;
-        point_marker.type = visualization_msgs::Marker::SPHERE;
-        point_marker.action = visualization_msgs::Marker::ADD;
-        point_marker.pose.position.x = f->state[0];
-        point_marker.pose.position.y = f->state[1];
-        point_marker.pose.position.z = f->state[2] + 0.2;
-        point_marker.pose.orientation.w = 1.0;
-        point_marker.scale.x = 0.35;
-        point_marker.scale.y = 0.35;
-        point_marker.scale.z = 0.35;
-        point_marker.color.a = 0.85;
-        point_marker.color.r = r;
-        point_marker.color.g = g;
-        point_marker.color.b = b;
-        winner_markers.markers.push_back(point_marker);
-
-        visualization_msgs::Marker text_marker;
-        text_marker.header.stamp = ros::Time::now();
-        text_marker.header.frame_id = world_frame_;
-        text_marker.ns = "auction_frontier_winners_text";
-        text_marker.id = marker_id++;
-        text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
-        text_marker.action = visualization_msgs::Marker::ADD;
-        text_marker.pose.position.x = f->state[0];
-        text_marker.pose.position.y = f->state[1];
-        text_marker.pose.position.z = f->state[2] + 0.75;
-        text_marker.pose.orientation.w = 1.0;
-        text_marker.scale.z = 0.35;
-        text_marker.color.a = 1.0;
-        text_marker.color.r = r;
-        text_marker.color.g = g;
-        text_marker.color.b = b;
-        text_marker.text = "winner=R" + std::to_string(winner);
-        winner_markers.markers.push_back(text_marker);
-      }
-      auction_frontier_markers_pub_.publish(winner_markers);
-    }
+    performAutomaticGlobalFrontierSelection(frontier_graph_rep, ignore_time,
+                                            &feasible_global_frontiers,
+                                            &best_gain, &best_frontier);
     // Print out
     // ROS_WARN_COND(global_verbosity >= Verbosity::WARN, "List of potential frontier in decreasing order of gain:");
     // for (int i = 0; i < feasible_global_frontiers.size(); ++i) {

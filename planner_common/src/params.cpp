@@ -1298,6 +1298,124 @@ bool PlanningParams::loadParams(std::string ns) {
     ROSPARAM_WARN(param_name, gcaa_bid_timeout_sec);
   }
 
+  param_name = ns + "/dpfp_frontier_prioritization_enable";
+  if (!ros::param::get(param_name, dpfp_frontier_prioritization_enable)) {
+    dpfp_frontier_prioritization_enable = false;
+    ROSPARAM_WARN(param_name, dpfp_frontier_prioritization_enable);
+  }
+
+  param_name = ns + "/dpfp_max_components";
+  if (!ros::param::get(param_name, dpfp_max_components)) {
+    dpfp_max_components = 8;
+    ROSPARAM_WARN(param_name, dpfp_max_components);
+  }
+  dpfp_max_components = std::max(1, dpfp_max_components);
+
+  param_name = ns + "/dpfp_em_iterations";
+  if (!ros::param::get(param_name, dpfp_em_iterations)) {
+    dpfp_em_iterations = 12;
+    ROSPARAM_WARN(param_name, dpfp_em_iterations);
+  }
+  dpfp_em_iterations = std::max(1, dpfp_em_iterations);
+
+  param_name = ns + "/dpfp_floor_variance";
+  if (!ros::param::get(param_name, dpfp_floor_variance)) {
+    dpfp_floor_variance = 0.25;
+    ROSPARAM_WARN(param_name, dpfp_floor_variance);
+  }
+  dpfp_floor_variance = std::max(1e-6, dpfp_floor_variance);
+
+  param_name = ns + "/dpfp_prob_epsilon";
+  if (!ros::param::get(param_name, dpfp_prob_epsilon)) {
+    dpfp_prob_epsilon = 1e-9;
+    ROSPARAM_WARN(param_name, dpfp_prob_epsilon);
+  }
+  dpfp_prob_epsilon = std::max(1e-15, dpfp_prob_epsilon);
+
+  param_name = ns + "/dpfp_score_blend";
+  if (!ros::param::get(param_name, dpfp_score_blend)) {
+    dpfp_score_blend = 0.65;
+    ROSPARAM_WARN(param_name, dpfp_score_blend);
+  }
+  dpfp_score_blend = std::min(1.0, std::max(0.0, dpfp_score_blend));
+
+  param_name = ns + "/dpfp_min_relative_joint";
+  if (!ros::param::get(param_name, dpfp_min_relative_joint)) {
+    dpfp_min_relative_joint = 0.06;
+    ROSPARAM_WARN(param_name, dpfp_min_relative_joint);
+  }
+  dpfp_min_relative_joint =
+      std::min(1.0, std::max(1e-6, dpfp_min_relative_joint));
+
+  param_name = ns + "/efmes_frontier_enable";
+  if (!ros::param::get(param_name, efmes_frontier_enable)) {
+    efmes_frontier_enable = false;
+    ROSPARAM_WARN(param_name, efmes_frontier_enable);
+  }
+
+  param_name = ns + "/efmes_cluster_cell_m";
+  if (!ros::param::get(param_name, efmes_cluster_cell_m)) {
+    efmes_cluster_cell_m = 0.8;
+    ROSPARAM_WARN(param_name, efmes_cluster_cell_m);
+  }
+  efmes_cluster_cell_m = std::max(0.05, efmes_cluster_cell_m);
+
+  param_name = ns + "/efmes_path_dist_eps";
+  if (!ros::param::get(param_name, efmes_path_dist_eps)) {
+    efmes_path_dist_eps = 0.25;
+    ROSPARAM_WARN(param_name, efmes_path_dist_eps);
+  }
+  efmes_path_dist_eps = std::max(1e-4, efmes_path_dist_eps);
+
+  param_name = ns + "/efmes_d0_rep_m";
+  if (!ros::param::get(param_name, efmes_d0_rep_m)) {
+    efmes_d0_rep_m = 8.0;
+    ROSPARAM_WARN(param_name, efmes_d0_rep_m);
+  }
+  efmes_d0_rep_m = std::max(0.1, efmes_d0_rep_m);
+
+  param_name = ns + "/efmes_alpha_safe";
+  if (!ros::param::get(param_name, efmes_alpha_safe)) {
+    efmes_alpha_safe = 1.5;
+    ROSPARAM_WARN(param_name, efmes_alpha_safe);
+  }
+  efmes_alpha_safe = std::max(0.1, efmes_alpha_safe);
+
+  param_name = ns + "/efmes_amax";
+  if (!ros::param::get(param_name, efmes_amax)) {
+    efmes_amax = 1.0;
+    ROSPARAM_WARN(param_name, efmes_amax);
+  }
+  efmes_amax = std::max(0.05, efmes_amax);
+
+  param_name = ns + "/efmes_k_rep_scale";
+  if (!ros::param::get(param_name, efmes_k_rep_scale)) {
+    efmes_k_rep_scale = 1.0;
+    ROSPARAM_WARN(param_name, efmes_k_rep_scale);
+  }
+  efmes_k_rep_scale = std::max(0.01, efmes_k_rep_scale);
+
+  param_name = ns + "/efmes_repulsion_weight";
+  if (!ros::param::get(param_name, efmes_repulsion_weight)) {
+    efmes_repulsion_weight = 0.12;
+    ROSPARAM_WARN(param_name, efmes_repulsion_weight);
+  }
+  efmes_repulsion_weight = std::max(0.0, efmes_repulsion_weight);
+
+  param_name = ns + "/efmes_score_blend";
+  if (!ros::param::get(param_name, efmes_score_blend)) {
+    efmes_score_blend = 0.55;
+    ROSPARAM_WARN(param_name, efmes_score_blend);
+  }
+  efmes_score_blend = std::min(1.0, std::max(0.0, efmes_score_blend));
+
+  param_name = ns + "/efmes_min_multiplier";
+  if (!ros::param::get(param_name, efmes_min_multiplier)) {
+    efmes_min_multiplier = 0.12;
+    ROSPARAM_WARN(param_name, efmes_min_multiplier);
+  }
+  efmes_min_multiplier = std::min(1.0, std::max(1e-6, efmes_min_multiplier));
+
   parse_str.clear();
   param_name = ns + "/comm_topology_mode";
   ros::param::get(param_name, parse_str);

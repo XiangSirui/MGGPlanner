@@ -20,6 +20,8 @@ cs_add_library(
   ${PROJECT_NAME}
   src/mggplanner.cpp
   src/comm_link_model.cpp
+  src/dpfp_frontier_prioritizer.cpp
+  src/efmes_frontier_scorer.cpp
   src/rrg.cpp
   src/mggplanner_rviz.cpp
 )

@@ -450,6 +450,81 @@ class Rrg {
   double getTimeElapsed();
   double getTimeRemained();
   bool isRemainingTimeSufficient(const double& time_cost, double& time_spare);
+
+  /** Per-vertex global frontier score used after shortest-path queries. */
+  struct GlobalFrontierScoreBreakdown {
+    double score = 0.0;
+    double current_to_frontier_distance = 0.0;
+    std::vector<int> current_to_frontier_path_id;
+  };
+
+  double computeGlobalFrontierPathRisk(const std::vector<int>& path_ids) const;
+  GlobalFrontierScoreBreakdown evaluateGlobalFrontierVertexScore(
+      Vertex* f, const ShortestPathsReport& frontier_graph_rep,
+      bool ignore_time);
+  static int parseRobotIdFromPeerTfFrame(const std::string& frame);
+  void fillTeamRobotWorldPositions(
+      std::unordered_map<int, Eigen::Vector3d>* robot_positions);
+  void collectAuctionRobotPositions(
+      std::unordered_map<int, Eigen::Vector3d>* robot_positions);
+  double computeFrontierAuctionBid(const Eigen::Vector3d& robot_pos,
+                                   Vertex* f) const;
+  bool frontierPassesSinglePassAuctionFilter(
+      Vertex* f, bool auction_enabled,
+      const std::unordered_map<int, Eigen::Vector3d>& robot_positions,
+      std::unordered_map<int, int>* frontier_winner_map);
+  std::unordered_map<int, double> buildDpfpJointMapForFeasibleFrontiers(
+      const std::vector<Vertex*>& feasible_global_frontiers) const;
+  double scaleGlobalFrontierScoreWithDpfp(
+      double base_score, int frontier_id,
+      const std::unordered_map<int, double>* dpfp_joint) const;
+  std::unordered_map<int, double> buildEfmesMultiplierMapForFeasibleFrontiers(
+      const std::vector<Vertex*>& feasible_global_frontiers,
+      const ShortestPathsReport& frontier_graph_rep, bool ignore_time,
+      const std::unordered_map<int, Eigen::Vector3d>& team_positions);
+  double scaleGlobalFrontierScoreWithEfmes(
+      double base_score, int frontier_id,
+      const std::unordered_map<int, double>* efmes_mult) const;
+  void runGcaaMultiRoundFrontierAssignment(
+      const std::vector<Vertex*>& feasible_global_frontiers,
+      bool gcaa_full_enabled,
+      const std::unordered_map<int, Eigen::Vector3d>& robot_positions,
+      const ShortestPathsReport& frontier_graph_rep, bool ignore_time,
+      const std::unordered_map<int, double>* efmes_mult,
+      const std::unordered_map<int, double>* dpfp_joint,
+      std::unordered_map<int, double>* frontier_exp_gain,
+      std::unordered_map<int, int>* frontier_winner_map, double* best_gain,
+      Vertex** best_frontier);
+  void scoreFeasibleFrontiersWithSinglePassAuction(
+      const std::vector<Vertex*>& feasible_global_frontiers,
+      bool auction_enabled,
+      const std::unordered_map<int, Eigen::Vector3d>& robot_positions,
+      const ShortestPathsReport& frontier_graph_rep, bool ignore_time,
+      const std::unordered_map<int, double>* efmes_mult,
+      const std::unordered_map<int, double>* dpfp_joint,
+      std::unordered_map<int, double>* frontier_exp_gain,
+      std::unordered_map<int, int>* frontier_winner_map, double* best_gain,
+      Vertex** best_frontier);
+  void maybeApplyAuctionEmptyFallbackToLegacy(
+      bool auction_enabled,
+      const std::vector<Vertex*>& feasible_global_frontiers,
+      const ShortestPathsReport& frontier_graph_rep, bool ignore_time,
+      const std::unordered_map<int, double>* efmes_mult,
+      const std::unordered_map<int, double>* dpfp_joint,
+      std::unordered_map<int, double>* frontier_exp_gain, double* best_gain,
+      Vertex** best_frontier);
+  void sortFeasibleGlobalFrontiersByDescendingGain(
+      std::vector<Vertex*>* feasible_global_frontiers,
+      std::unordered_map<int, double>* frontier_exp_gain);
+  void publishAuctionFrontierWinnerVisualization(
+      bool auction_enabled,
+      const std::vector<Vertex*>& feasible_global_frontiers,
+      const std::unordered_map<int, int>& frontier_winner_map);
+  void performAutomaticGlobalFrontierSelection(
+      const ShortestPathsReport& frontier_graph_rep, bool ignore_time,
+      std::vector<Vertex*>* feasible_global_frontiers, double* best_gain,
+      Vertex** best_frontier);
+
   /** SOC % budget for a homing path length (linearized vs exploration calibration). */
   double estimateHomingSocBudgetPercent(double path_length_m) const;
   /**
